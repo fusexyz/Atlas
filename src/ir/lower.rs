@@ -1,5 +1,5 @@
 use super::ir::{self as ir, *};
-use crate::parser::ast::{self, *};
+use crate::parser::ast::*;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -17,10 +17,34 @@ macro_rules! err {
 
 type LR<T> = Result<T, LowerError>;
 
+#[derive(Debug, Clone)]
+pub struct StructLayout {
+    pub size: u64,
+    pub align: u64,
+    pub field_offsets: HashMap<String, u64>,
+    pub field_types: HashMap<String, TypeSpec>,
+}
+
 pub fn lower_module(tu: &TranslationUnit) -> LR<Module> {
     let mut ctx = ModuleCtx::new();
+    ctx.enum_constants = tu.enum_constants.clone();
     for item in &tu.items {
-        ctx.lower_top_level(item)?;
+        if let TopLevel::Typedef(ty, name, _) = item {
+            ctx.typedefs.insert(name.clone(), ty.clone());
+        }
+    }
+    for item in &tu.items {
+        if let TopLevel::StructDef(s) = item {
+            ctx.lower_struct_def(s)?;
+        }
+    }
+    for item in &tu.items {
+        match item {
+            TopLevel::StructDef(_) | TopLevel::Typedef(_, _, _) => {}
+            _ => {
+                ctx.lower_top_level(item)?;
+            }
+        }
     }
     Ok(ctx.module)
 }
@@ -29,6 +53,10 @@ struct ModuleCtx {
     module: Module,
     func_sigs: HashMap<String, (Vec<IrType>, IrType)>,
     str_count: u32,
+    typedefs: HashMap<String, TypeSpec>,
+    struct_layouts: HashMap<String, StructLayout>,
+    globals: HashMap<String, TypeSpec>,
+    enum_constants: HashMap<String, i64>,
 }
 
 impl ModuleCtx {
@@ -37,6 +65,10 @@ impl ModuleCtx {
             module: Module::default(),
             func_sigs: HashMap::new(),
             str_count: 0,
+            typedefs: HashMap::new(),
+            struct_layouts: HashMap::new(),
+            globals: HashMap::new(),
+            enum_constants: HashMap::new(),
         }
     }
 
@@ -45,17 +77,112 @@ impl ModuleCtx {
             TopLevel::Function(f) => self.lower_function(f),
             TopLevel::FuncDecl(d) => self.lower_func_decl(d),
             TopLevel::Declaration(d) => self.lower_global_decl(d),
-            TopLevel::StructDef(_) => Ok(()),
+            TopLevel::StructDef(s) => self.lower_struct_def(s),
             TopLevel::Typedef(_, _, _) => Ok(()),
         }
     }
 
+    fn lower_struct_def(&mut self, s: &StructDef) -> LR<()> {
+        let mut size = 0u64;
+        let mut align = 1u64;
+        let mut field_offsets = HashMap::new();
+        let mut field_types = HashMap::new();
+        let pack = s.pack;
+
+        if s.is_union {
+            for field in &s.fields {
+                let (f_sz, f_aln) = get_type_size_and_align(
+                    &field.ty,
+                    &self.typedefs,
+                    &self.struct_layouts,
+                    &self.enum_constants,
+                )?;
+                let packed_aln = f_aln.min(pack);
+                align = align.max(packed_aln);
+                size = size.max(f_sz);
+
+                if field.name.starts_with("__anon_field_") {
+                    if let Some(anon_name) = get_struct_or_union_name(&field.ty, &self.typedefs) {
+                        if let Some(anon_layout) = self.struct_layouts.get(&anon_name).cloned() {
+                            for (sub_name, sub_offset) in &anon_layout.field_offsets {
+                                field_offsets.insert(sub_name.clone(), 0 + sub_offset);
+                                if let Some(sub_ty) = anon_layout.field_types.get(sub_name) {
+                                    field_types.insert(sub_name.clone(), sub_ty.clone());
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                field_offsets.insert(field.name.clone(), 0u64);
+                field_types.insert(field.name.clone(), field.ty.clone());
+            }
+            size = (size + align - 1) / align * align;
+        } else {
+            for field in &s.fields {
+                let (f_sz, f_aln) = get_type_size_and_align(
+                    &field.ty,
+                    &self.typedefs,
+                    &self.struct_layouts,
+                    &self.enum_constants,
+                )?;
+                let packed_aln = f_aln.min(pack);
+                align = align.max(packed_aln);
+                size = (size + packed_aln - 1) / packed_aln * packed_aln;
+
+                if field.name.starts_with("__anon_field_") {
+                    if let Some(anon_name) = get_struct_or_union_name(&field.ty, &self.typedefs) {
+                        if let Some(anon_layout) = self.struct_layouts.get(&anon_name).cloned() {
+                            for (sub_name, sub_offset) in &anon_layout.field_offsets {
+                                field_offsets.insert(sub_name.clone(), size + sub_offset);
+                                if let Some(sub_ty) = anon_layout.field_types.get(sub_name) {
+                                    field_types.insert(sub_name.clone(), sub_ty.clone());
+                                }
+                            }
+                            size += f_sz;
+                            continue;
+                        }
+                    }
+                }
+
+                field_offsets.insert(field.name.clone(), size);
+                field_types.insert(field.name.clone(), field.ty.clone());
+                size += f_sz;
+            }
+            size = (size + align - 1) / align * align;
+        }
+
+        self.struct_layouts.insert(
+            s.name.clone(),
+            StructLayout {
+                size,
+                align,
+                field_offsets,
+                field_types,
+            },
+        );
+        Ok(())
+    }
+
     fn lower_func_decl(&mut self, decl: &FuncDecl) -> LR<()> {
-        let ret_ty = lower_type(&decl.ret_ty)?;
+        let ret_ty = lower_type(
+            &decl.ret_ty,
+            &self.typedefs,
+            &self.struct_layouts,
+            &self.enum_constants,
+        )?;
         let param_tys: Vec<IrType> = decl
             .params
             .iter()
-            .map(|p| lower_type(&p.ty))
+            .map(|p| {
+                lower_type(
+                    &p.ty,
+                    &self.typedefs,
+                    &self.struct_layouts,
+                    &self.enum_constants,
+                )
+            })
             .collect::<Result<_, _>>()?;
         self.func_sigs
             .insert(decl.name.clone(), (param_tys.clone(), ret_ty.clone()));
@@ -73,12 +200,19 @@ impl ModuleCtx {
             ret_ty,
             blocks: Vec::new(),
             is_extern: true,
+            variadic: false,
         });
         Ok(())
     }
 
     fn lower_global_decl(&mut self, decl: &Decl) -> LR<()> {
-        let ty = lower_type(&decl.ty)?;
+        self.globals.insert(decl.name.clone(), decl.ty.clone());
+        let ty = lower_type(
+            &decl.ty,
+            &self.typedefs,
+            &self.struct_layouts,
+            &self.enum_constants,
+        )?;
         let init = match &decl.init {
             Some(Expr {
                 kind: ExprKind::IntLit(v),
@@ -102,13 +236,23 @@ impl ModuleCtx {
     }
 
     fn lower_function(&mut self, func: &FuncDef) -> LR<()> {
-        let ret_ty = lower_type(&func.ret_ty)?;
+        let ret_ty = lower_type(
+            &func.ret_ty,
+            &self.typedefs,
+            &self.struct_layouts,
+            &self.enum_constants,
+        )?;
         let mut params = Vec::new();
         let mut param_tys = Vec::new();
         let mut next_reg = 0u32;
 
         for p in &func.params {
-            let ty = lower_type(&p.ty)?;
+            let ty = lower_type(
+                &p.ty,
+                &self.typedefs,
+                &self.struct_layouts,
+                &self.enum_constants,
+            )?;
             param_tys.push(ty.clone());
             params.push(IrParam {
                 ty,
@@ -124,11 +268,16 @@ impl ModuleCtx {
             name: func.name.clone(),
             ret_ty: ret_ty.clone(),
             params: params.clone(),
+            variadic: func.variadic,
             blocks: Vec::new(),
             next_reg,
             next_block: 0,
             locals: HashMap::new(),
             func_sigs: &self.func_sigs,
+            typedefs: &self.typedefs,
+            struct_layouts: &self.struct_layouts,
+            globals: &self.globals,
+            enum_constants: &self.enum_constants,
             loop_exit: Vec::new(),
             loop_cond: Vec::new(),
             string_lits: Vec::new(),
@@ -152,7 +301,10 @@ impl ModuleCtx {
                 .name
                 .as_deref()
             {
-                fb.locals.insert(name.to_string(), (slot, p.ty.clone()));
+                let param_spec =
+                    &func.params[params.iter().position(|x| x.reg == p.reg).unwrap()].ty;
+                fb.locals
+                    .insert(name.to_string(), (slot, param_spec.clone()));
             }
         }
 
@@ -180,11 +332,16 @@ struct FuncBuilder<'a> {
     name: String,
     ret_ty: IrType,
     params: Vec<IrParam>,
+    variadic: bool,
     blocks: Vec<BasicBlock>,
     next_reg: u32,
     next_block: u32,
-    locals: HashMap<String, (VReg, IrType)>,
+    locals: HashMap<String, (VReg, TypeSpec)>,
     func_sigs: &'a HashMap<String, (Vec<IrType>, IrType)>,
+    typedefs: &'a HashMap<String, TypeSpec>,
+    struct_layouts: &'a HashMap<String, StructLayout>,
+    globals: &'a HashMap<String, TypeSpec>,
+    enum_constants: &'a HashMap<String, i64>,
     loop_exit: Vec<BlockId>,
     loop_cond: Vec<BlockId>,
     string_lits: Vec<(String, Vec<u8>)>,
@@ -289,9 +446,15 @@ impl<'a> FuncBuilder<'a> {
     }
 
     fn lower_local_decl(&mut self, decl: &Decl, bb: BlockId) -> LR<BlockId> {
-        let ty = lower_type(&decl.ty)?;
+        let ty = lower_type(
+            &decl.ty,
+            self.typedefs,
+            self.struct_layouts,
+            &self.enum_constants,
+        )?;
         let slot = self.emit_alloca(bb, ty.clone());
-        self.locals.insert(decl.name.clone(), (slot, ty.clone()));
+        self.locals
+            .insert(decl.name.clone(), (slot, decl.ty.clone()));
 
         if let Some(init_expr) = &decl.init {
             let val = self.lower_expr(init_expr, bb)?;
@@ -482,14 +645,37 @@ impl<'a> FuncBuilder<'a> {
             }
 
             ExprKind::Ident(name) => {
-                if let Some((slot, ty)) = self.locals.get(name).cloned() {
+                if let Some((slot, ty_spec)) = self.locals.get(name).cloned() {
                     let dst = self.fresh();
+                    let ty = lower_type(
+                        &ty_spec,
+                        self.typedefs,
+                        self.struct_layouts,
+                        &self.enum_constants,
+                    )?;
                     self.emit(
                         bb,
                         Instr::Load {
                             dst,
                             ty,
                             ptr: Value::Reg(slot),
+                        },
+                    );
+                    Ok(Value::Reg(dst))
+                } else if let Some(ty_spec) = self.globals.get(name).cloned() {
+                    let dst = self.fresh();
+                    let ty = lower_type(
+                        &ty_spec,
+                        self.typedefs,
+                        self.struct_layouts,
+                        &self.enum_constants,
+                    )?;
+                    self.emit(
+                        bb,
+                        Instr::Load {
+                            dst,
+                            ty,
+                            ptr: Value::Global(name.clone()),
                         },
                     );
                     Ok(Value::Reg(dst))
@@ -725,7 +911,8 @@ impl<'a> FuncBuilder<'a> {
 
             ExprKind::Cast(ty, inner) => {
                 let val = self.lower_expr(inner, bb)?;
-                let to_ty = lower_type(ty)?;
+                let to_ty =
+                    lower_type(ty, self.typedefs, self.struct_layouts, &self.enum_constants)?;
                 let dst = self.fresh();
                 self.emit(
                     bb,
@@ -741,38 +928,100 @@ impl<'a> FuncBuilder<'a> {
 
             ExprKind::Sizeof(arg) => {
                 let size = match arg {
-                    SizeofArg::Type(ty) => lower_type(ty)?.size_bytes(),
-                    SizeofArg::Expr(e) => match &e.kind {
-                        ExprKind::Ident(name) => self
-                            .locals
-                            .get(name)
-                            .map(|(_, ty)| ty.size_bytes())
-                            .unwrap_or(8),
-                        _ => 8,
-                    },
+                    SizeofArg::Type(ty) => {
+                        lower_type(ty, self.typedefs, self.struct_layouts, &self.enum_constants)?
+                            .size_bytes()
+                    }
+                    SizeofArg::Expr(e) => {
+                        let ty_spec = expr_type(
+                            e,
+                            &self.locals,
+                            self.typedefs,
+                            self.struct_layouts,
+                            self.globals,
+                        )?;
+                        let (sz, _) = get_type_size_and_align(
+                            &ty_spec,
+                            self.typedefs,
+                            self.struct_layouts,
+                            &self.enum_constants,
+                        )?;
+                        sz
+                    }
                 };
                 Ok(Value::ImmI(size as i64))
             }
 
+            ExprKind::Alignof(arg) => {
+                let align = match arg {
+                    SizeofArg::Type(ty) => {
+                        let (_, aln) = get_type_size_and_align(
+                            ty,
+                            self.typedefs,
+                            self.struct_layouts,
+                            &self.enum_constants,
+                        )?;
+                        aln
+                    }
+                    SizeofArg::Expr(e) => {
+                        let ty_spec = expr_type(
+                            e,
+                            &self.locals,
+                            self.typedefs,
+                            self.struct_layouts,
+                            self.globals,
+                        )?;
+                        let (_, aln) = get_type_size_and_align(
+                            &ty_spec,
+                            self.typedefs,
+                            self.struct_layouts,
+                            &self.enum_constants,
+                        )?;
+                        aln
+                    }
+                };
+                Ok(Value::ImmI(align as i64))
+            }
+
             ExprKind::Index(base, idx) => {
                 let ptr = self.gep_ptr(base, idx, bb)?;
+                let ty_spec = expr_type(
+                    expr,
+                    &self.locals,
+                    self.typedefs,
+                    self.struct_layouts,
+                    self.globals,
+                )?;
+                let ty = lower_type(
+                    &ty_spec,
+                    self.typedefs,
+                    self.struct_layouts,
+                    &self.enum_constants,
+                )?;
                 let dst = self.fresh();
-                self.emit(
-                    bb,
-                    Instr::Load {
-                        dst,
-                        ty: IrType::I64,
-                        ptr,
-                    },
-                );
+                self.emit(bb, Instr::Load { dst, ty, ptr });
                 Ok(Value::Reg(dst))
             }
 
             ExprKind::Member(_, _) | ExprKind::Arrow(_, _) => {
-                err!("struct member access not yet implemented")
+                let ptr = self.lvalue_ptr(expr, bb)?;
+                let ty_spec = expr_type(
+                    expr,
+                    &self.locals,
+                    self.typedefs,
+                    self.struct_layouts,
+                    self.globals,
+                )?;
+                let ty = lower_type(
+                    &ty_spec,
+                    self.typedefs,
+                    self.struct_layouts,
+                    &self.enum_constants,
+                )?;
+                let dst = self.fresh();
+                self.emit(bb, Instr::Load { dst, ty, ptr });
+                Ok(Value::Reg(dst))
             }
-
-            ExprKind::Binary(_, _, _) => unreachable!(),
         }
     }
 
@@ -787,34 +1036,131 @@ impl<'a> FuncBuilder<'a> {
             }
             ExprKind::Deref(inner) => self.lower_expr(inner, bb),
             ExprKind::Index(base, idx) => self.gep_ptr(base, idx, bb),
+            ExprKind::Member(base, field) => {
+                let base_ptr = self.lvalue_ptr(base, bb)?;
+                let base_ty = expr_type(
+                    base,
+                    &self.locals,
+                    self.typedefs,
+                    self.struct_layouts,
+                    self.globals,
+                )?;
+                let resolved = resolve_typedefs(&base_ty, self.typedefs)?;
+                let struct_name = match resolved {
+                    TypeSpec::Struct(name) => name,
+                    _ => return err!("member access on non-struct type"),
+                };
+                let layout = self
+                    .struct_layouts
+                    .get(&struct_name)
+                    .ok_or_else(|| LowerError(format!("undefined struct '{}'", struct_name)))?;
+                let offset = *layout.field_offsets.get(field).ok_or_else(|| {
+                    LowerError(format!("no field '{}' in struct '{}'", field, struct_name))
+                })?;
+
+                let dst = self.fresh();
+                self.emit(
+                    bb,
+                    Instr::Gep {
+                        dst,
+                        elem_ty: IrType::I8,
+                        base: base_ptr,
+                        idx: Value::ImmI(offset as i64),
+                    },
+                );
+                Ok(Value::Reg(dst))
+            }
+            ExprKind::Arrow(base, field) => {
+                let base_ptr = self.lower_expr(base, bb)?;
+                let base_ty = expr_type(
+                    base,
+                    &self.locals,
+                    self.typedefs,
+                    self.struct_layouts,
+                    self.globals,
+                )?;
+                let resolved = resolve_typedefs(&base_ty, self.typedefs)?;
+                let inner_ty = match resolved {
+                    TypeSpec::Pointer(inner) => inner,
+                    _ => return err!("arrow access on non-pointer type"),
+                };
+                let resolved_inner = resolve_typedefs(&inner_ty, self.typedefs)?;
+                let struct_name = match resolved_inner {
+                    TypeSpec::Struct(name) => name,
+                    _ => return err!("arrow access on pointer to non-struct type"),
+                };
+                let layout = self
+                    .struct_layouts
+                    .get(&struct_name)
+                    .ok_or_else(|| LowerError(format!("undefined struct '{}'", struct_name)))?;
+                let offset = *layout.field_offsets.get(field).ok_or_else(|| {
+                    LowerError(format!("no field '{}' in struct '{}'", field, struct_name))
+                })?;
+
+                let dst = self.fresh();
+                self.emit(
+                    bb,
+                    Instr::Gep {
+                        dst,
+                        elem_ty: IrType::I8,
+                        base: base_ptr,
+                        idx: Value::ImmI(offset as i64),
+                    },
+                );
+                Ok(Value::Reg(dst))
+            }
             _ => err!("not a valid lvalue"),
         }
     }
 
     fn lvalue_type(&self, expr: &Expr) -> LR<IrType> {
-        match &expr.kind {
-            ExprKind::Ident(name) => {
-                if let Some((_, ty)) = self.locals.get(name) {
-                    Ok(ty.clone())
-                } else {
-                    Ok(IrType::I64)
-                }
-            }
-            ExprKind::Deref(_) => Ok(IrType::I64),
-            ExprKind::Index(_, _) => Ok(IrType::I64),
-            _ => Ok(IrType::I64),
-        }
+        let ty_spec = expr_type(
+            expr,
+            &self.locals,
+            self.typedefs,
+            self.struct_layouts,
+            self.globals,
+        )?;
+        lower_type(
+            &ty_spec,
+            self.typedefs,
+            self.struct_layouts,
+            &self.enum_constants,
+        )
     }
 
     fn gep_ptr(&mut self, base: &Expr, idx: &Expr, bb: BlockId) -> LR<Value> {
         let base_ptr = self.lvalue_ptr(base, bb)?;
         let idx_val = self.lower_expr(idx, bb)?;
+        let base_ty = expr_type(
+            base,
+            &self.locals,
+            self.typedefs,
+            self.struct_layouts,
+            self.globals,
+        )?;
+        let resolved = resolve_typedefs(&base_ty, self.typedefs)?;
+        let elem_ty = match resolved {
+            TypeSpec::Pointer(inner) => lower_type(
+                &inner,
+                self.typedefs,
+                self.struct_layouts,
+                &self.enum_constants,
+            )?,
+            TypeSpec::Array(elem, _) => lower_type(
+                &elem,
+                self.typedefs,
+                self.struct_layouts,
+                &self.enum_constants,
+            )?,
+            _ => IrType::I64,
+        };
         let dst = self.fresh();
         self.emit(
             bb,
             Instr::Gep {
                 dst,
-                elem_ty: IrType::I64,
+                elem_ty,
                 base: base_ptr,
                 idx: idx_val,
             },
@@ -837,12 +1183,18 @@ impl<'a> FuncBuilder<'a> {
             ret_ty: self.ret_ty,
             blocks: self.blocks,
             is_extern: false,
+            variadic: self.variadic,
         };
         Ok((func, self.string_lits, self.next_str))
     }
 }
 
-pub fn lower_type(ty: &TypeSpec) -> LR<IrType> {
+pub fn lower_type(
+    ty: &TypeSpec,
+    typedefs: &HashMap<String, TypeSpec>,
+    struct_layouts: &HashMap<String, StructLayout>,
+    enum_constants: &HashMap<String, i64>,
+) -> LR<IrType> {
     match ty {
         TypeSpec::Void => Ok(IrType::Void),
         TypeSpec::Char => Ok(IrType::I8),
@@ -851,22 +1203,50 @@ pub fn lower_type(ty: &TypeSpec) -> LR<IrType> {
         TypeSpec::Long | TypeSpec::LongLong => Ok(IrType::I64),
         TypeSpec::Float => Ok(IrType::F32),
         TypeSpec::Double => Ok(IrType::F64),
-        TypeSpec::Unsigned(inner) => lower_type(inner),
-        TypeSpec::Signed(inner) => lower_type(inner),
-        TypeSpec::Pointer(inner) => Ok(IrType::Ptr(Box::new(lower_type(inner)?))),
+        TypeSpec::Unsigned(inner) => lower_type(inner, typedefs, struct_layouts, enum_constants),
+        TypeSpec::Signed(inner) => lower_type(inner, typedefs, struct_layouts, enum_constants),
+        TypeSpec::Pointer(inner) => Ok(IrType::Ptr(Box::new(lower_type(
+            inner,
+            typedefs,
+            struct_layouts,
+            enum_constants,
+        )?))),
         TypeSpec::Array(elem, Some(size_expr)) => {
-            let elem_ty = lower_type(elem)?;
-            let n = match &size_expr.kind {
-                ExprKind::IntLit(v) => *v as u64,
-                _ => return err!("array size must be a constant integer"),
-            };
+            let elem_ty = lower_type(elem, typedefs, struct_layouts, enum_constants)?;
+            let n = eval_const_expr_lower(size_expr, typedefs, struct_layouts, enum_constants)
+                .ok_or_else(|| {
+                    LowerError(format!(
+                        "array size must be a constant integer expression: {:?}",
+                        size_expr
+                    ))
+                })? as u64;
             Ok(IrType::Array(Box::new(elem_ty), n))
         }
-        TypeSpec::Array(elem, None) => Ok(IrType::Ptr(Box::new(lower_type(elem)?))),
-        TypeSpec::Struct(name) => err!("struct type '{name}' not yet fully lowered"),
-        TypeSpec::Union(name) => err!("union type '{name}' not yet fully lowered"),
+        TypeSpec::Array(elem, None) => Ok(IrType::Ptr(Box::new(lower_type(
+            elem,
+            typedefs,
+            struct_layouts,
+            enum_constants,
+        )?))),
+        TypeSpec::Struct(name) => {
+            let layout = struct_layouts
+                .get(name)
+                .ok_or_else(|| LowerError(format!("undefined struct '{}'", name)))?;
+            Ok(IrType::Array(Box::new(IrType::I8), layout.size))
+        }
+        TypeSpec::Union(name) => {
+            let layout = struct_layouts
+                .get(name)
+                .ok_or_else(|| LowerError(format!("undefined union '{}'", name)))?;
+            Ok(IrType::Array(Box::new(IrType::I8), layout.size))
+        }
         TypeSpec::Enum(_) => Ok(IrType::I32),
-        TypeSpec::Named(name) => err!("typedef '{name}' not resolved"),
+        TypeSpec::Named(name) => {
+            let resolved = typedefs
+                .get(name)
+                .ok_or_else(|| LowerError(format!("undefined typedef type '{}'", name)))?;
+            lower_type(resolved, typedefs, struct_layouts, enum_constants)
+        }
     }
 }
 
@@ -907,5 +1287,254 @@ fn assign_to_binop(op: &AssignOp) -> BinOpKind {
         AssignOp::ShlAssign => BinOpKind::Shl,
         AssignOp::ShrAssign => BinOpKind::Shr,
         AssignOp::Assign => unreachable!(),
+    }
+}
+
+fn get_type_size_and_align(
+    ty: &TypeSpec,
+    typedefs: &HashMap<String, TypeSpec>,
+    struct_layouts: &HashMap<String, StructLayout>,
+    enum_constants: &HashMap<String, i64>,
+) -> LR<(u64, u64)> {
+    match ty {
+        TypeSpec::Void => Ok((0, 1)),
+        TypeSpec::Char => Ok((1, 1)),
+        TypeSpec::Short => Ok((2, 2)),
+        TypeSpec::Int => Ok((4, 4)),
+        TypeSpec::Long | TypeSpec::LongLong => Ok((8, 8)),
+        TypeSpec::Float => Ok((4, 4)),
+        TypeSpec::Double => Ok((8, 8)),
+        TypeSpec::Unsigned(inner) | TypeSpec::Signed(inner) => {
+            get_type_size_and_align(inner, typedefs, struct_layouts, enum_constants)
+        }
+        TypeSpec::Pointer(_) => Ok((8, 8)),
+        TypeSpec::Array(elem, Some(size_expr)) => {
+            let (elem_sz, elem_aln) =
+                get_type_size_and_align(elem, typedefs, struct_layouts, enum_constants)?;
+            let n = eval_const_expr_lower(size_expr, typedefs, struct_layouts, enum_constants)
+                .ok_or_else(|| {
+                    LowerError(format!(
+                        "array size must be a constant integer expression: {:?}",
+                        size_expr
+                    ))
+                })? as u64;
+            Ok((elem_sz * n, elem_aln))
+        }
+        TypeSpec::Array(_elem, None) => Ok((8, 8)),
+        TypeSpec::Struct(name) => {
+            let layout = struct_layouts
+                .get(name)
+                .ok_or_else(|| LowerError(format!("undefined struct '{}'", name)))?;
+            Ok((layout.size, layout.align))
+        }
+        TypeSpec::Union(name) => {
+            let layout = struct_layouts
+                .get(name)
+                .ok_or_else(|| LowerError(format!("undefined union '{}'", name)))?;
+            Ok((layout.size, layout.align))
+        }
+        TypeSpec::Enum(_) => Ok((4, 4)),
+        TypeSpec::Named(name) => {
+            let resolved = typedefs
+                .get(name)
+                .ok_or_else(|| LowerError(format!("undefined typedef '{}'", name)))?;
+            get_type_size_and_align(resolved, typedefs, struct_layouts, enum_constants)
+        }
+    }
+}
+
+fn expr_type(
+    expr: &Expr,
+    locals: &HashMap<String, (VReg, TypeSpec)>,
+    typedefs: &HashMap<String, TypeSpec>,
+    struct_layouts: &HashMap<String, StructLayout>,
+    globals: &HashMap<String, TypeSpec>,
+) -> LR<TypeSpec> {
+    match &expr.kind {
+        ExprKind::IntLit(_) => Ok(TypeSpec::Int),
+        ExprKind::FloatLit(_) => Ok(TypeSpec::Double),
+        ExprKind::CharLit(_) => Ok(TypeSpec::Char),
+        ExprKind::StringLit(_) => Ok(TypeSpec::Pointer(Box::new(TypeSpec::Char))),
+        ExprKind::Ident(name) => {
+            if let Some((_, ty)) = locals.get(name) {
+                Ok(ty.clone())
+            } else if let Some(ty) = globals.get(name) {
+                Ok(ty.clone())
+            } else {
+                Ok(TypeSpec::Int)
+            }
+        }
+        ExprKind::Unary(_, inner) => expr_type(inner, locals, typedefs, struct_layouts, globals),
+        ExprKind::Binary(_, lhs, _) => expr_type(lhs, locals, typedefs, struct_layouts, globals),
+        ExprKind::Assign(_, lhs, _) => expr_type(lhs, locals, typedefs, struct_layouts, globals),
+        ExprKind::Ternary(_, then_e, _) => {
+            expr_type(then_e, locals, typedefs, struct_layouts, globals)
+        }
+        ExprKind::Call(_, _) => Ok(TypeSpec::Int),
+        ExprKind::Index(base, _) => {
+            let base_ty = expr_type(base, locals, typedefs, struct_layouts, globals)?;
+            let resolved = resolve_typedefs(&base_ty, typedefs)?;
+            match resolved {
+                TypeSpec::Pointer(inner) => Ok(*inner.clone()),
+                TypeSpec::Array(elem, _) => Ok(*elem.clone()),
+                _ => err!("indexing non-pointer type"),
+            }
+        }
+        ExprKind::Member(base, field) => {
+            let base_ty = expr_type(base, locals, typedefs, struct_layouts, globals)?;
+            let resolved = resolve_typedefs(&base_ty, typedefs)?;
+            let struct_name = match resolved {
+                TypeSpec::Struct(name) => name,
+                _ => return err!("member access on non-struct type"),
+            };
+            let layout = struct_layouts
+                .get(&struct_name)
+                .ok_or_else(|| LowerError(format!("undefined struct '{}'", struct_name)))?;
+            let f_ty = layout.field_types.get(field).ok_or_else(|| {
+                LowerError(format!("no field '{}' in struct '{}'", field, struct_name))
+            })?;
+            Ok(f_ty.clone())
+        }
+        ExprKind::Arrow(base, field) => {
+            let base_ty = expr_type(base, locals, typedefs, struct_layouts, globals)?;
+            let resolved = resolve_typedefs(&base_ty, typedefs)?;
+            let inner_ty = match resolved {
+                TypeSpec::Pointer(inner) => inner,
+                _ => return err!("arrow access on non-pointer type"),
+            };
+            let resolved_inner = resolve_typedefs(&inner_ty, typedefs)?;
+            let struct_name = match resolved_inner {
+                TypeSpec::Struct(name) => name,
+                _ => return err!("arrow access on pointer to non-struct type"),
+            };
+            let layout = struct_layouts
+                .get(&struct_name)
+                .ok_or_else(|| LowerError(format!("undefined struct '{}'", struct_name)))?;
+            let f_ty = layout.field_types.get(field).ok_or_else(|| {
+                LowerError(format!("no field '{}' in struct '{}'", field, struct_name))
+            })?;
+            Ok(f_ty.clone())
+        }
+        ExprKind::Cast(ty, _) => Ok(ty.clone()),
+        ExprKind::Sizeof(_) | ExprKind::Alignof(_) => Ok(TypeSpec::Int),
+        ExprKind::AddrOf(inner) => {
+            let inner_ty = expr_type(inner, locals, typedefs, struct_layouts, globals)?;
+            Ok(TypeSpec::Pointer(Box::new(inner_ty)))
+        }
+        ExprKind::Deref(inner) => {
+            let inner_ty = expr_type(inner, locals, typedefs, struct_layouts, globals)?;
+            let resolved = resolve_typedefs(&inner_ty, typedefs)?;
+            match resolved {
+                TypeSpec::Pointer(inner) => Ok(*inner.clone()),
+                _ => err!("dereferencing non-pointer type"),
+            }
+        }
+    }
+}
+
+fn resolve_typedefs(
+    ty: &TypeSpec,
+    typedefs: &HashMap<String, TypeSpec>,
+) -> Result<TypeSpec, LowerError> {
+    let mut current = ty.clone();
+    let mut depth = 0;
+    while let TypeSpec::Named(name) = current {
+        if depth > 100 {
+            return err!("typedef loop detected for '{}'", name);
+        }
+        current = typedefs
+            .get(&name)
+            .ok_or_else(|| LowerError(format!("undefined typedef '{}'", name)))?
+            .clone();
+        depth += 1;
+    }
+    Ok(current)
+}
+
+fn get_struct_or_union_name(ty: &TypeSpec, typedefs: &HashMap<String, TypeSpec>) -> Option<String> {
+    let mut current = ty.clone();
+    let mut depth = 0;
+    while let TypeSpec::Named(name) = current {
+        if depth > 100 {
+            return None;
+        }
+        if let Some(resolved) = typedefs.get(&name) {
+            current = resolved.clone();
+        } else {
+            return None;
+        }
+        depth += 1;
+    }
+    match current {
+        TypeSpec::Struct(name) | TypeSpec::Union(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn eval_const_expr_lower(
+    expr: &Expr,
+    typedefs: &HashMap<String, TypeSpec>,
+    struct_layouts: &HashMap<String, StructLayout>,
+    enum_constants: &HashMap<String, i64>,
+) -> Option<i64> {
+    match &expr.kind {
+        ExprKind::IntLit(val) => Some(*val),
+        ExprKind::Ident(name) => enum_constants.get(name).copied(),
+        ExprKind::Unary(UnaryOp::Neg, inner) => {
+            eval_const_expr_lower(inner, typedefs, struct_layouts, enum_constants).map(|v| -v)
+        }
+        ExprKind::Unary(UnaryOp::Not, inner) => {
+            eval_const_expr_lower(inner, typedefs, struct_layouts, enum_constants)
+                .map(|v| if v == 0 { 1 } else { 0 })
+        }
+        ExprKind::Unary(UnaryOp::BitNot, inner) => {
+            eval_const_expr_lower(inner, typedefs, struct_layouts, enum_constants).map(|v| !v)
+        }
+        ExprKind::Binary(op, lhs, rhs) => {
+            let l = eval_const_expr_lower(lhs, typedefs, struct_layouts, enum_constants)?;
+            let r = eval_const_expr_lower(rhs, typedefs, struct_layouts, enum_constants)?;
+            match op {
+                BinaryOp::Add => Some(l + r),
+                BinaryOp::Sub => Some(l - r),
+                BinaryOp::Mul => Some(l * r),
+                BinaryOp::Div => {
+                    if r != 0 {
+                        Some(l / r)
+                    } else {
+                        None
+                    }
+                }
+                BinaryOp::Mod => {
+                    if r != 0 {
+                        Some(l % r)
+                    } else {
+                        None
+                    }
+                }
+                BinaryOp::BitAnd => Some(l & r),
+                BinaryOp::BitOr => Some(l | r),
+                BinaryOp::BitXor => Some(l ^ r),
+                BinaryOp::Shl => Some(l << r),
+                BinaryOp::Shr => Some(l >> r),
+                _ => None,
+            }
+        }
+        ExprKind::Sizeof(arg) => match arg {
+            SizeofArg::Type(ts) => {
+                let (sz, _) =
+                    get_type_size_and_align(ts, typedefs, struct_layouts, enum_constants).ok()?;
+                Some(sz as i64)
+            }
+            SizeofArg::Expr(_) => None,
+        },
+        ExprKind::Alignof(arg) => match arg {
+            SizeofArg::Type(ts) => {
+                let (_, aln) =
+                    get_type_size_and_align(ts, typedefs, struct_layouts, enum_constants).ok()?;
+                Some(aln as i64)
+            }
+            SizeofArg::Expr(_) => None,
+        },
+        _ => None,
     }
 }

@@ -23,6 +23,7 @@ pub enum TypeSpec {
 #[derive(Debug, Clone)]
 pub struct TranslationUnit {
     pub items: Vec<TopLevel>,
+    pub enum_constants: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,7 @@ pub struct StructDef {
     pub fields: Vec<FieldDecl>,
     pub is_union: bool,
     pub span: Span,
+    pub pack: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +154,7 @@ pub enum ExprKind {
 
     Cast(TypeSpec, Box<Expr>),
     Sizeof(SizeofArg),
+    Alignof(SizeofArg),
     AddrOf(Box<Expr>),
     Deref(Box<Expr>),
 }

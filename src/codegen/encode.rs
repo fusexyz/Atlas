@@ -5,7 +5,6 @@ use std::collections::HashMap;
 pub struct EncodedFunction {
     pub name: String,
     pub bytes: Vec<u8>,
-    pub labels: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -93,10 +92,6 @@ fn rex_w(r_ext: bool, b_ext: bool) -> u8 {
     0x48 | ((r_ext as u8) << 2) | (b_ext as u8)
 }
 
-fn rex_w_full(r_ext: bool, x_ext: bool, b_ext: bool) -> u8 {
-    0x48 | ((r_ext as u8) << 2) | ((x_ext as u8) << 1) | (b_ext as u8)
-}
-
 fn modrm(mod_: u8, reg: u8, rm: u8) -> u8 {
     (mod_ << 6) | ((reg & 7) << 3) | (rm & 7)
 }
@@ -107,9 +102,18 @@ fn encode_rr(enc: &mut Enc, opcode: u8, dst: Reg, src: Reg) {
     enc.emit(modrm(0b11, dst.num(), src.num()));
 }
 
-fn encode_rm_mem(enc: &mut Enc, opcode: u8, reg: Reg, base: Reg, disp: i32) {
-    enc.emit(rex_w(reg.num() >= 8, base.num() >= 8));
-    enc.emit(opcode);
+fn encode_rm_mem_sized(
+    enc: &mut Enc,
+    prefix: Option<u8>,
+    opcodes: &[u8],
+    reg: Reg,
+    base: Reg,
+    disp: i32,
+) {
+    if let Some(p) = prefix {
+        enc.emit(p);
+    }
+    enc.emit_slice(opcodes);
 
     let needs_sib = (base.num() & 7) == 4;
     let needs_disp = (base.num() & 7) == 5 || disp != 0;
@@ -135,15 +139,156 @@ fn encode_rm_mem(enc: &mut Enc, opcode: u8, reg: Reg, base: Reg, disp: i32) {
     }
 }
 
-fn encode_rm_rip(enc: &mut Enc, opcode: u8, reg: Reg, sym: &str) {
-    enc.emit(rex_w(reg.num() >= 8, false));
-    enc.emit(opcode);
+fn encode_rm_mem(enc: &mut Enc, opcode: u8, reg: Reg, base: Reg, disp: i32) {
+    let prefix = rex_w(reg.num() >= 8, base.num() >= 8);
+    encode_rm_mem_sized(enc, Some(prefix), &[opcode], reg, base, disp);
+}
+
+fn encode_rm_rip_sized(enc: &mut Enc, prefix: Option<u8>, opcodes: &[u8], reg: Reg, sym: &str) {
+    if let Some(p) = prefix {
+        enc.emit(p);
+    }
+    enc.emit_slice(opcodes);
     enc.emit(modrm(0b00, reg.num(), 5));
     enc.emit_ripsym(sym);
 }
 
+fn encode_rm_rip(enc: &mut Enc, opcode: u8, reg: Reg, sym: &str) {
+    let prefix = rex_w(reg.num() >= 8, false);
+    encode_rm_rip_sized(enc, Some(prefix), &[opcode], reg, sym);
+}
+
 fn fits_i8(v: i64) -> bool {
     v >= -128 && v <= 127
+}
+
+fn rex_prefix(r_ext: bool, b_ext: bool, force_rex: bool) -> Option<u8> {
+    if r_ext || b_ext || force_rex {
+        Some(0x40 | ((r_ext as u8) << 2) | (b_ext as u8))
+    } else {
+        None
+    }
+}
+
+fn needs_rex_8(r: Reg) -> bool {
+    r.num() >= 4
+}
+
+fn encode_mov8(enc: &mut Enc, dst: &Operand, src: &Operand) -> ER<()> {
+    match (dst, src) {
+        (Operand::Mem { base, disp }, Operand::Reg(s)) => {
+            let prefix = rex_prefix(s.num() >= 8, base.num() >= 8, needs_rex_8(*s));
+            encode_rm_mem_sized(enc, prefix, &[0x88], *s, *base, *disp);
+        }
+        (Operand::RipSym(sym), Operand::Reg(s)) => {
+            let prefix = rex_prefix(s.num() >= 8, false, needs_rex_8(*s));
+            encode_rm_rip_sized(enc, prefix, &[0x88], *s, sym);
+        }
+        _ => return err!("mov8: unsupported operands"),
+    }
+    Ok(())
+}
+
+fn encode_mov16(enc: &mut Enc, dst: &Operand, src: &Operand) -> ER<()> {
+    enc.emit(0x66);
+    match (dst, src) {
+        (Operand::Mem { base, disp }, Operand::Reg(s)) => {
+            let prefix = rex_prefix(s.num() >= 8, base.num() >= 8, false);
+            encode_rm_mem_sized(enc, prefix, &[0x89], *s, *base, *disp);
+        }
+        (Operand::RipSym(sym), Operand::Reg(s)) => {
+            let prefix = rex_prefix(s.num() >= 8, false, false);
+            encode_rm_rip_sized(enc, prefix, &[0x89], *s, sym);
+        }
+        _ => return err!("mov16: unsupported operands"),
+    }
+    Ok(())
+}
+
+fn encode_mov32(enc: &mut Enc, dst: &Operand, src: &Operand) -> ER<()> {
+    match (dst, src) {
+        (Operand::Reg(d), Operand::Reg(s)) => {
+            let prefix = rex_prefix(d.num() >= 8, s.num() >= 8, false);
+            if let Some(p) = prefix {
+                enc.emit(p);
+            }
+            enc.emit(0x8B);
+            enc.emit(modrm(0b11, d.num(), s.num()));
+        }
+        (Operand::Reg(d), Operand::Mem { base, disp }) => {
+            let prefix = rex_prefix(d.num() >= 8, base.num() >= 8, false);
+            encode_rm_mem_sized(enc, prefix, &[0x8B], *d, *base, *disp);
+        }
+        (Operand::Mem { base, disp }, Operand::Reg(s)) => {
+            let prefix = rex_prefix(s.num() >= 8, base.num() >= 8, false);
+            encode_rm_mem_sized(enc, prefix, &[0x89], *s, *base, *disp);
+        }
+        (Operand::Reg(d), Operand::RipSym(sym)) => {
+            let prefix = rex_prefix(d.num() >= 8, false, false);
+            encode_rm_rip_sized(enc, prefix, &[0x8B], *d, sym);
+        }
+        (Operand::RipSym(sym), Operand::Reg(s)) => {
+            let prefix = rex_prefix(s.num() >= 8, false, false);
+            encode_rm_rip_sized(enc, prefix, &[0x89], *s, sym);
+        }
+        (Operand::Reg(d), Operand::Imm(v)) => {
+            if d.num() >= 8 {
+                enc.emit(0x41);
+            }
+            enc.emit(0xB8 | (d.num() & 7));
+            enc.emit_i32(*v as i32);
+        }
+        _ => return err!("mov32: unsupported operands"),
+    }
+    Ok(())
+}
+
+fn encode_movzx8(enc: &mut Enc, dst: Reg, src: &Operand) -> ER<()> {
+    match src {
+        Operand::Reg(s) => {
+            let prefix = rex_prefix(dst.num() >= 8, s.num() >= 8, needs_rex_8(*s));
+            if let Some(p) = prefix {
+                enc.emit(p);
+            }
+            enc.emit(0x0F);
+            enc.emit(0xB6);
+            enc.emit(modrm(0b11, dst.num(), s.num()));
+        }
+        Operand::Mem { base, disp } => {
+            let prefix = rex_prefix(dst.num() >= 8, base.num() >= 8, false);
+            encode_rm_mem_sized(enc, prefix, &[0x0F, 0xB6], dst, *base, *disp);
+        }
+        Operand::RipSym(sym) => {
+            let prefix = rex_prefix(dst.num() >= 8, false, false);
+            encode_rm_rip_sized(enc, prefix, &[0x0F, 0xB6], dst, sym);
+        }
+        _ => return err!("movzx8: unsupported source operand"),
+    }
+    Ok(())
+}
+
+fn encode_movzx16(enc: &mut Enc, dst: Reg, src: &Operand) -> ER<()> {
+    match src {
+        Operand::Reg(s) => {
+            let prefix = rex_prefix(dst.num() >= 8, s.num() >= 8, false);
+            if let Some(p) = prefix {
+                enc.emit(p);
+            }
+            enc.emit(0x0F);
+            enc.emit(0xB7);
+            enc.emit(modrm(0b11, dst.num(), s.num()));
+        }
+        Operand::Mem { base, disp } => {
+            let prefix = rex_prefix(dst.num() >= 8, base.num() >= 8, false);
+            encode_rm_mem_sized(enc, prefix, &[0x0F, 0xB7], dst, *base, *disp);
+        }
+        Operand::RipSym(sym) => {
+            let prefix = rex_prefix(dst.num() >= 8, false, false);
+            encode_rm_rip_sized(enc, prefix, &[0x0F, 0xB7], dst, sym);
+        }
+        _ => return err!("movzx16: unsupported source operand"),
+    }
+    Ok(())
 }
 
 fn encode_alu_reg_op(
@@ -184,7 +329,6 @@ pub fn encode_function(name: &str, insts: &[Inst]) -> ER<(EncodedFunction, Vec<R
         EncodedFunction {
             name: name.to_string(),
             bytes: enc.buf,
-            labels: enc.labels,
         },
         relocs,
     ))
@@ -303,12 +447,11 @@ fn encode_inst(enc: &mut Enc, inst: &Inst) -> ER<()> {
             enc.emit(modrm(0b11, 0, r.num()));
         }
 
-        Inst::Movzx8(dst, src) => {
-            enc.emit(rex_w_full(dst.num() >= 8, false, src.num() >= 8));
-            enc.emit(0x0F);
-            enc.emit(0xB6);
-            enc.emit(modrm(0b11, dst.num(), src.num()));
-        }
+        Inst::Movzx8(dst, src) => encode_movzx8(enc, *dst, src)?,
+        Inst::Movzx16(dst, src) => encode_movzx16(enc, *dst, src)?,
+        Inst::Mov8(dst, src) => encode_mov8(enc, dst, src)?,
+        Inst::Mov16(dst, src) => encode_mov16(enc, dst, src)?,
+        Inst::Mov32(dst, src) => encode_mov32(enc, dst, src)?,
 
         Inst::Call(label) => {
             enc.emit(0xE8);

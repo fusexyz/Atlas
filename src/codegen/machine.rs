@@ -1,4 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Reg {
     Rax,
     Rcx,
@@ -84,6 +85,50 @@ impl Reg {
             R15 => "r15b",
         }
     }
+
+    pub fn name16(self) -> &'static str {
+        use Reg::*;
+        match self {
+            Rax => "ax",
+            Rcx => "cx",
+            Rdx => "dx",
+            Rbx => "bx",
+            Rsp => "sp",
+            Rbp => "bp",
+            Rsi => "si",
+            Rdi => "di",
+            R8 => "r8w",
+            R9 => "r9w",
+            R10 => "r10w",
+            R11 => "r11w",
+            R12 => "r12w",
+            R13 => "r13w",
+            R14 => "r14w",
+            R15 => "r15w",
+        }
+    }
+
+    pub fn name32(self) -> &'static str {
+        use Reg::*;
+        match self {
+            Rax => "eax",
+            Rcx => "ecx",
+            Rdx => "edx",
+            Rbx => "ebx",
+            Rsp => "esp",
+            Rbp => "ebp",
+            Rsi => "esi",
+            Rdi => "edi",
+            R8 => "r8d",
+            R9 => "r9d",
+            R10 => "r10d",
+            R11 => "r11d",
+            R12 => "r12d",
+            R13 => "r13d",
+            R14 => "r14d",
+            R15 => "r15d",
+        }
+    }
 }
 
 pub const ARG_REGS: [Reg; 4] = [Reg::Rcx, Reg::Rdx, Reg::R8, Reg::R9];
@@ -120,12 +165,6 @@ pub enum Operand {
 }
 
 impl Operand {
-    pub fn reg(r: Reg) -> Operand {
-        Operand::Reg(r)
-    }
-    pub fn imm(v: i64) -> Operand {
-        Operand::Imm(v)
-    }
     pub fn mem(base: Reg, disp: i32) -> Operand {
         Operand::Mem { base, disp }
     }
@@ -152,7 +191,11 @@ pub enum Inst {
     Idiv(Operand),
     Cmp(Operand, Operand),
     Setcc(Cond, Reg),
-    Movzx8(Reg, Reg),
+    Movzx8(Reg, Operand),
+    Movzx16(Reg, Operand),
+    Mov8(Operand, Operand),
+    Mov16(Operand, Operand),
+    Mov32(Operand, Operand),
     Call(String),
     CallImport(String),
     CallReg(Reg),
@@ -202,7 +245,30 @@ impl std::fmt::Display for Inst {
             Inst::Idiv(s) => write!(f, "    idiv {s}"),
             Inst::Cmp(a, b) => write!(f, "    cmp {a}, {b}"),
             Inst::Setcc(c, r) => write!(f, "    set{} {}", c.suffix(), r.name8()),
-            Inst::Movzx8(d, s) => write!(f, "    movzx {}, {}", d.name64(), s.name8()),
+            Inst::Movzx8(d, s) => match s {
+                Operand::Reg(r) => write!(f, "    movzx {}, {}", d.name64(), r.name8()),
+                mem => write!(f, "    movzx {}, byte ptr {}", d.name64(), mem),
+            },
+            Inst::Movzx16(d, s) => match s {
+                Operand::Reg(r) => write!(f, "    movzx {}, {}", d.name64(), r.name16()),
+                mem => write!(f, "    movzx {}, word ptr {}", d.name64(), mem),
+            },
+            Inst::Mov8(d, s) => match (d, s) {
+                (dest, Operand::Reg(r)) => write!(f, "    mov byte ptr {}, {}", dest, r.name8()),
+                (dest, src) => write!(f, "    mov byte ptr {}, {}", dest, src),
+            },
+            Inst::Mov16(d, s) => match (d, s) {
+                (dest, Operand::Reg(r)) => write!(f, "    mov word ptr {}, {}", dest, r.name16()),
+                (dest, src) => write!(f, "    mov word ptr {}, {}", dest, src),
+            },
+            Inst::Mov32(d, s) => match (d, s) {
+                (Operand::Reg(r1), Operand::Reg(r2)) => {
+                    write!(f, "    mov {}, {}", r1.name32(), r2.name32())
+                }
+                (Operand::Reg(r), mem) => write!(f, "    mov {}, dword ptr {}", r.name32(), mem),
+                (mem, Operand::Reg(r)) => write!(f, "    mov dword ptr {}, {}", mem, r.name32()),
+                (dest, src) => write!(f, "    mov {}, {}", dest, src),
+            },
             Inst::Call(s) => write!(f, "    call {s}"),
             Inst::CallImport(s) => write!(f, "    call qword ptr [rip+{s}]"),
             Inst::CallReg(r) => write!(f, "    call {}", r.name64()),

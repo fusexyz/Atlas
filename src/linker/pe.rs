@@ -1,4 +1,5 @@
 use crate::codegen::{EncodedFunction, Reloc};
+use crate::ir::ir::{Global, Value};
 use std::collections::HashMap;
 
 const FILE_ALIGN: u32 = 0x200;
@@ -28,6 +29,7 @@ pub fn write_pe(
     entry: &str,
     extra_imports: &[(&str, &str)],
     string_lits: &[(String, Vec<u8>)],
+    globals: &[Global],
 ) -> Result<Vec<u8>, String> {
     let mut all_imports: Vec<(&str, &str)> = extra_imports.to_vec();
     if !all_imports.iter().any(|(_, s)| *s == "ExitProcess") {
@@ -77,7 +79,77 @@ pub fn write_pe(
     }
     let rdata_raw_size = rdata_bytes.len() as u32;
 
-    let idata_va: u32 = if has_rdata {
+    let has_data = globals.iter().any(|g| !g.is_extern);
+    let data_va: u32 = if has_rdata {
+        rdata_va + align_up(rdata_vsize, SECT_ALIGN)
+    } else {
+        text_end_va
+    };
+
+    let mut data_bytes: Vec<u8> = Vec::new();
+    let mut data_syms: HashMap<String, u32> = HashMap::new();
+    if has_data {
+        for g in globals {
+            if g.is_extern {
+                continue;
+            }
+            let size = g.ty.size_bytes();
+            let align = match size {
+                0 => 1,
+                1 => 1,
+                2 => 2,
+                3 | 4 => 4,
+                _ => 8,
+            };
+            while data_bytes.len() as u64 % align != 0 {
+                data_bytes.push(0);
+            }
+            let sym_rva = data_va + data_bytes.len() as u32;
+            data_syms.insert(g.name.clone(), sym_rva);
+
+            let start_offset = data_bytes.len();
+            data_bytes.resize(start_offset + size as usize, 0);
+
+            if let Some(init_val) = &g.init {
+                match init_val {
+                    Value::ImmI(val) => match size {
+                        1 => data_bytes[start_offset] = *val as u8,
+                        2 => data_bytes[start_offset..start_offset + 2]
+                            .copy_from_slice(&(*val as u16).to_le_bytes()),
+                        4 => data_bytes[start_offset..start_offset + 4]
+                            .copy_from_slice(&(*val as u32).to_le_bytes()),
+                        8 => data_bytes[start_offset..start_offset + 8]
+                            .copy_from_slice(&(*val as u64).to_le_bytes()),
+                        _ => {
+                            let write_len = size.min(8) as usize;
+                            let val_bytes = val.to_le_bytes();
+                            data_bytes[start_offset..start_offset + write_len]
+                                .copy_from_slice(&val_bytes[..write_len]);
+                        }
+                    },
+                    Value::ImmF(val) => {
+                        if size == 4 {
+                            data_bytes[start_offset..start_offset + 4]
+                                .copy_from_slice(&((*val as f32).to_bits()).to_le_bytes());
+                        } else if size == 8 {
+                            data_bytes[start_offset..start_offset + 8]
+                                .copy_from_slice(&(val.to_bits()).to_le_bytes());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let data_vsize = data_bytes.len() as u32;
+    while data_bytes.len() % FILE_ALIGN as usize != 0 {
+        data_bytes.push(0);
+    }
+    let data_raw_size = data_bytes.len() as u32;
+
+    let idata_va: u32 = if has_data {
+        data_va + align_up(data_vsize, SECT_ALIGN)
+    } else if has_rdata {
         rdata_va + align_up(rdata_vsize, SECT_ALIGN)
     } else {
         text_end_va
@@ -109,6 +181,8 @@ pub fn write_pe(
                 text_va as u64 + f_off as u64
             } else if let Some(&rdata_rva) = rdata_syms.get(&r.symbol) {
                 rdata_rva as u64
+            } else if let Some(&data_rva) = data_syms.get(&r.symbol) {
+                data_rva as u64
             } else {
                 return Err(format!("reloc: unknown symbol '{}'", r.symbol));
             };
@@ -160,7 +234,17 @@ pub fn write_pe(
     let idata_bytes = build_idata(idata_va, &by_dll);
     let idata_vsize = idata_bytes.len() as u32;
     let rdata_raw = text_raw + text_raw_size;
-    let idata_raw = rdata_raw + rdata_raw_size;
+    let data_raw = if has_rdata {
+        rdata_raw + rdata_raw_size
+    } else {
+        rdata_raw
+    };
+    let idata_raw = if has_data {
+        data_raw + data_raw_size
+    } else {
+        data_raw
+    };
+
     let mut idata_padded = idata_bytes;
     while idata_padded.len() % FILE_ALIGN as usize != 0 {
         idata_padded.push(0);
@@ -186,7 +270,17 @@ pub fn write_pe(
 
     pe.extend_from_slice(b"PE\0\0");
 
-    let nsections: u16 = if has_rdata { 3 } else { 2 };
+    let nsections: u16 = {
+        let mut n = 2;
+        if has_rdata {
+            n += 1;
+        }
+        if has_data {
+            n += 1;
+        }
+        n
+    };
+
     let mut coff = [0u8; 20];
     put_u16(&mut coff, 0, 0x8664);
     put_u16(&mut coff, 2, nsections);
@@ -198,7 +292,14 @@ pub fn write_pe(
     put_u16(&mut opt, 0, 0x020B);
     opt[2] = 14;
     put_u32(&mut opt, 4, text_vsize);
-    put_u32(&mut opt, 8, rdata_vsize + idata_vsize);
+    let mut init_data_size = idata_vsize;
+    if has_rdata {
+        init_data_size += rdata_vsize;
+    }
+    if has_data {
+        init_data_size += data_vsize;
+    }
+    put_u32(&mut opt, 8, init_data_size);
     put_u32(&mut opt, 16, ep_rva);
     put_u32(&mut opt, 20, text_va);
     put_u64(&mut opt, 24, IMAGE_BASE);
@@ -241,6 +342,16 @@ pub fn write_pe(
             0x40000040,
         ));
     }
+    if has_data {
+        pe.extend_from_slice(&section_entry(
+            b".data\0\0\0",
+            data_vsize,
+            data_va,
+            data_raw_size,
+            data_raw,
+            0xC0000040,
+        ));
+    }
     pe.extend_from_slice(&section_entry(
         b".idata\0\0",
         idata_vsize,
@@ -257,6 +368,9 @@ pub fn write_pe(
     pe.extend_from_slice(&text);
     if has_rdata {
         pe.extend_from_slice(&rdata_bytes);
+    }
+    if has_data {
+        pe.extend_from_slice(&data_bytes);
     }
     pe.extend_from_slice(&idata_padded);
 

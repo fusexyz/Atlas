@@ -31,10 +31,6 @@ impl IrType {
             IrType::Array(e, n) => e.size_bytes() * n,
         }
     }
-
-    pub fn is_integer(&self) -> bool {
-        matches!(self, IrType::I8 | IrType::I16 | IrType::I32 | IrType::I64)
-    }
 }
 
 impl std::fmt::Display for IrType {
@@ -194,12 +190,7 @@ pub struct Function {
     pub ret_ty: IrType,
     pub blocks: Vec<BasicBlock>,
     pub is_extern: bool,
-}
-
-impl Function {
-    pub fn entry(&self) -> BlockId {
-        self.blocks[0].id
-    }
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone)]

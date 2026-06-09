@@ -55,7 +55,7 @@ fn vreg_count(func: &Function) -> u32 {
     for p in &func.params {
         bump(p.reg.0);
     }
-    let mut scan_val = |v: &Value, bump: &mut dyn FnMut(u32)| {
+    let scan_val = |v: &Value, bump: &mut dyn FnMut(u32)| {
         if let Value::Reg(r) = v {
             bump(r.0);
         }
@@ -207,12 +207,26 @@ impl<'a> Gen<'a> {
             self.push(Inst::Sub(RSP, Operand::Imm(fs)));
         }
 
-        if self.func.params.len() > 4 {
-            return err!("functions with more than 4 parameters are not yet supported");
+        if self.func.variadic {
+            for (i, reg) in ARG_REGS.iter().enumerate() {
+                self.push(Inst::Mov(
+                    Operand::mem(RBP, (16 + 8 * i) as i32),
+                    Operand::Reg(*reg),
+                ));
+            }
         }
+
         for (i, p) in self.func.params.iter().enumerate() {
             let off = self.slot(p.reg);
-            self.push(Inst::Mov(Operand::mem(RBP, off), Operand::Reg(ARG_REGS[i])));
+            if i < 4 {
+                self.push(Inst::Mov(Operand::mem(RBP, off), Operand::Reg(ARG_REGS[i])));
+            } else {
+                self.push(Inst::Mov(
+                    Operand::Reg(RAX),
+                    Operand::mem(RBP, (16 + 8 * (i - 4)) as i32),
+                ));
+                self.push(Inst::Mov(Operand::mem(RBP, off), Operand::Reg(RAX)));
+            }
         }
 
         for bb in &self.func.blocks {
@@ -241,16 +255,28 @@ impl<'a> Gen<'a> {
                 self.store_reg(*dst, RAX);
             }
 
-            Instr::Load { dst, ptr, .. } => {
+            Instr::Load { dst, ty, ptr } => {
                 self.load_value(ptr, RAX)?;
-                self.push(Inst::Mov(Operand::Reg(RCX), Operand::mem(RAX, 0)));
+                let size = ty.size_bytes();
+                match size {
+                    1 => self.push(Inst::Movzx8(RCX, Operand::mem(RAX, 0))),
+                    2 => self.push(Inst::Movzx16(RCX, Operand::mem(RAX, 0))),
+                    4 => self.push(Inst::Mov32(Operand::Reg(RCX), Operand::mem(RAX, 0))),
+                    _ => self.push(Inst::Mov(Operand::Reg(RCX), Operand::mem(RAX, 0))),
+                }
                 self.store_reg(*dst, RCX);
             }
 
-            Instr::Store { val, ptr, .. } => {
+            Instr::Store { ty, val, ptr } => {
                 self.load_value(ptr, RAX)?;
                 self.load_value(val, RCX)?;
-                self.push(Inst::Mov(Operand::mem(RAX, 0), Operand::Reg(RCX)));
+                let size = ty.size_bytes();
+                match size {
+                    1 => self.push(Inst::Mov8(Operand::mem(RAX, 0), Operand::Reg(RCX))),
+                    2 => self.push(Inst::Mov16(Operand::mem(RAX, 0), Operand::Reg(RCX))),
+                    4 => self.push(Inst::Mov32(Operand::mem(RAX, 0), Operand::Reg(RCX))),
+                    _ => self.push(Inst::Mov(Operand::mem(RAX, 0), Operand::Reg(RCX))),
+                }
             }
 
             Instr::BinOp {
@@ -270,7 +296,7 @@ impl<'a> Gen<'a> {
                     UnaryOpKind::Not => {
                         self.push(Inst::Cmp(Operand::Reg(RAX), Operand::Imm(0)));
                         self.push(Inst::Setcc(Cond::E, RAX));
-                        self.push(Inst::Movzx8(RAX, RAX));
+                        self.push(Inst::Movzx8(RAX, Operand::Reg(RAX)));
                     }
                 }
                 self.store_reg(*dst, RAX);
@@ -279,6 +305,25 @@ impl<'a> Gen<'a> {
             Instr::Call {
                 dst, func, args, ..
             } => {
+                if matches!(func, Value::Global(name) if name == "__va_start") {
+                    let Some(list_ptr) = args.first() else {
+                        return err!("__va_start requires a va_list pointer");
+                    };
+                    if !self.func.variadic {
+                        return err!("__va_start used in non-variadic function");
+                    }
+                    self.load_value(list_ptr, RCX)?;
+                    self.push(Inst::Lea(
+                        RAX,
+                        Operand::mem(RBP, (16 + 8 * self.func.params.len()) as i32),
+                    ));
+                    self.push(Inst::Mov(Operand::mem(RCX, 0), Operand::Reg(RAX)));
+                    if let Some(d) = dst {
+                        self.store_reg(*d, RAX);
+                    }
+                    return Ok(());
+                }
+
                 if args.len() > 4 {
                     for (i, a) in args.iter().enumerate().skip(4) {
                         self.load_value(a, RAX)?;
@@ -371,7 +416,7 @@ impl<'a> Gen<'a> {
                 };
                 self.push(Inst::Cmp(Operand::Reg(RAX), Operand::Reg(RCX)));
                 self.push(Inst::Setcc(cond, RAX));
-                self.push(Inst::Movzx8(RAX, RAX));
+                self.push(Inst::Movzx8(RAX, Operand::Reg(RAX)));
             }
         }
     }

@@ -1,5 +1,5 @@
 pub mod ast;
 pub mod parser;
+pub mod pch;
 
-pub use ast::TranslationUnit;
-pub use parser::{ParseError, Parser};
+pub use parser::Parser;
