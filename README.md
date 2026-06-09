@@ -1,80 +1,48 @@
-# Hand-Rolled C to x86-64 PE Compiler
+# Hand-Rolled C to PE Compiler
 
-A self-contained C compiler written in Rust that compiles directly to native 64-bit Windows executables. 
+A self-contained C compiler written in Rust that compiles C source directly into native 64-bit Windows PE executables.
 
-This project operates without external toolchain dependencies: there is **no LLVM, no NASM, and no external linker**. Every phase—from scanning to writing PE32+ binaries and generating x86-64 machine instructions—is hand-coded from scratch.
+There is no LLVM, no NASM, and no external linker in the compile path. The compiler owns the pipeline from source text to PE32+ bytes:
 
+```text
+C source -> preprocessor -> lexer -> parser -> IR lowering -> x86-64 codegen -> PE writer -> runnable EXE
 ```
-C source → Lexer → Parser → IR Lowering → x86-64 Codegen → PE32+ Writer → Runnable EXE
-```
 
----
+## What It Can Do
 
-## Compiler Pipeline Architecture
+- Compile C directly to a Windows x64 `.exe`
+- Emit PE32+ files with `.text`, `.rdata`, `.data`, and `.idata` sections
+- Generate x86-64 machine code for the Microsoft x64 ABI
+- Build import tables and call external DLL functions through the IAT
+- Discover imports from installed Windows SDK/MSVC COFF import libraries
+- Preprocess local files and Windows/MSVC headers in memory
+- Handle structs, unions, typedefs, enums, arrays, pointers, globals, string literals, and common control flow
+- Compile and run the included `sysinfo.c` Windows diagnostic CLI
 
-### 1. Lexical Analysis (`src/lexer/`)
-Tokenizes standard C code. It parses numeric constants, identifier keywords, operators, character literals, and string literals, while filtering comments and whitespace.
+The compiler no longer writes a debug `preprocessed.c` side file during normal builds.
 
-### 2. Recursive-Descent Parsing (`src/parser/`)
-Parses tokens into a typed Abstract Syntax Tree (AST). Handled syntax includes:
-* Declarations (functions, locals, pointers, arrays, externs)
-* Control flow constructs (`if/else`, `while`, `for`, `return`)
-* Expressions with operator precedence climbing
+## Quick Start
 
-### 3. IR Lowering (`src/ir/`)
-Lowers AST nodes into a structured, flat Intermediate Representation (IR) consisting of explicit control-flow blocks and virtual instructions. During this pass, complex statements are normalized and functions are prepared for machine mapping.
-
-### 4. Code Generation & x86-64 Encoding (`src/codegen/`)
-Translates IR into concrete x86-64 instructions:
-* **Calling Convention**: Adheres to the **Microsoft x64 ABI**, passing the first four arguments in `RCX`, `RDX`, `R8`, and `R9`, allocating 32 bytes of shadow space on the stack, and returning values in `RAX`.
-* **String Allocation**: Places string literals in `.rdata` and addresses them using RIP-relative `LEA` instructions.
-* **x86-64 Instruction Encoding**: Encodes instructions into binary payloads (handling REX prefixes, ModR/M bytes, and SIB bytes).
-
-### 5. Linker & PE32+ Writer (`src/linker/`)
-Directly constructs the Windows Portable Executable (PE32+) format in memory:
-* Generates the DOS header, PE signature, COFF header, and PE32+ Optional Header.
-* Configures sections:
-  * `.text`: Contains executable code and the entry point trampoline.
-  * `.rdata`: Contains read-only data, such as static string literals.
-  * `.idata`: Houses the Import Directory, Import Address Table (IAT), and Hint/Name tables.
-* Implements a custom entry point trampoline that:
-  1. Aligns the stack to 16 bytes: `and rsp, -16` (satisfying Windows ABI requirements).
-  2. Invokes `main`: `call main`.
-  3. Moves the result code: `mov rcx, rax` (passing it as the first parameter to `ExitProcess`).
-  4. Reserves shadow stack: `sub rsp, 0x20`.
-  5. Dynamically terminates: `call [ExitProcess]` via the IAT.
-
----
-
-## Features & Supported Syntax
-
-* **Expressions**: Complete arithmetic operations (`+`, `-`, `*`, `/`, `%`), prefix/postfix increments, comparisons, and logical operators.
-* **Control Flow**: `if` / `else` conditionals, `while` and `for` loops, and function returns.
-* **Data Types**: Integers (`int`, `char`), explicit pointers (e.g. `int*`), and single-dimension arrays.
-* **Memory Addressing**: RIP-relative addressing for read-only string data and local stack offset allocation.
-* **Dynamic Linking / Imports**: Calls to external Win32 / DLL APIs through the Import Address Table.
-* **Built-in DLL Mapping**: Auto-resolves common standard functions (like `printf`, `malloc`, `MessageBoxA`, `ExitProcess`) to their respective Windows libraries (`ucrtbase.dll`, `KERNEL32.dll`, `USER32.dll`).
-
----
-
-## Usage
-
-Compile a source file directly to a Windows executable:
 ```powershell
-cargo run -- <input.c> <output.exe>
+cargo run -- sysinfo.c out.exe
+.\out.exe
 ```
 
-### Specifying Custom Imports
-If you reference external functions that are not recognized by the built-in library table, map them explicitly via the `--import` flag:
+Expected output includes host name, current user, RAM usage, CPU architecture/core count, page size, and C: drive capacity.
+
+To compile another C file:
+
 ```powershell
-cargo run -- input.c output.exe --import MyCustomLib.dll:MyFunctionName
+cargo run -- input.c output.exe
 ```
 
----
+For unusual imports that are not present in discovered SDK/MSVC import libraries:
 
-## Example: Native Windows MessageBox Dialog
+```powershell
+cargo run -- input.c output.exe --import MyDll.dll:MyFunction
+```
 
-The following C program declares `MessageBoxA` as an external symbol and invokes it:
+## Example
 
 ```c
 extern int MessageBoxA(void* hwnd, const char* text, const char* caption, int type);
@@ -85,45 +53,75 @@ int main() {
 }
 ```
 
-### Compiling and Running
-1. Save the snippet as `test_msgbox.c`.
-2. Compile the binary:
-   ```powershell
-   cargo run -- test_msgbox.c msgbox.exe
-   ```
-3. Run the executable:
-   ```powershell
-   .\msgbox.exe
-   ```
+```powershell
+cargo run -- test_msgbox.c msgbox.exe
+.\msgbox.exe
+```
 
----
+## Architecture
 
-## Current Scope Limits
+### Preprocessor
 
-To keep the compiler logic tight and self-contained, the following features are not currently implemented:
-* Structures (`struct`) and unions (`union`)
-* Type definitions (`typedef` resolution)
-* C Preprocessor (`#include`, `#define`, etc.)
-* Function signatures with more than 4 parameters (requiring stack-spilled arguments)
-* Floating-point calculations (`float` / `double`)
-* Global variables
+`src/preprocessor/` expands macros, resolves includes, predefines a small MSVC/Windows environment, and discovers installed SDK/MSVC include directories.
 
----
+### Lexer
 
-## Directory Structure
+`src/lexer/` tokenizes C source into keywords, identifiers, literals, operators, punctuation, and preprocessor-ready token streams.
 
-* [src/main.rs](file:///c:/Users/Ben/Desktop/Github/Compiler/src/main.rs): Entry point, argument parsing, and overall pipeline driver.
-* [src/lexer/](file:///c:/Users/Ben/Desktop/Github/Compiler/src/lexer/): Lexer scanner splitting input source into discrete C tokens.
-* [src/parser/](file:///c:/Users/Ben/Desktop/Github/Compiler/src/parser/): Recursive-descent parser mapping tokens to AST representations.
-* [src/ir/](file:///c:/Users/Ben/Desktop/Github/Compiler/src/ir/): Flat intermediate representation definitions and AST flattening logic.
-* [src/codegen/](file:///c:/Users/Ben/Desktop/Github/Compiler/src/codegen/): x86-64 machine instruction selection, register assignment, and REX/ModR/M byte encoding.
-* [src/linker/](file:///c:/Users/Ben/Desktop/Github/Compiler/src/linker/): PE32+ header generator, import table builder, and binary assembler.
+### Parser
 
----
+`src/parser/` is a hand-written recursive-descent parser. It builds the AST for declarations, functions, types, expressions, statements, structs/unions, enums, typedefs, and common MSVC syntax.
 
-## Project Status & Contributions
+### IR
 
-This is an educational research project exploring direct machine-code encoding, and link-free PE executable construction.
+`src/ir/` lowers the AST into a simpler intermediate representation with explicit blocks, virtual registers, loads/stores, calls, branches, globals, and string literals.
 
-Contributions, feature extensions, and bug fixes are very welcome! If you would like to help expand the language support (e.g. adding struct handling or global variables), feel free to open an issue or submit a pull request.
+### Codegen
 
+`src/codegen/` lowers IR into x86-64 machine instructions using the Microsoft x64 calling convention:
+
+- First four integer/pointer args in `RCX`, `RDX`, `R8`, `R9`
+- Stack shadow space for calls
+- Return values in `RAX`
+- RIP-relative access for strings, globals, and imports
+- Support for MSVC `__va_start` used by CRT inline varargs wrappers
+
+### Linker / PE Writer
+
+`src/linker/` writes PE32+ binaries directly. It builds headers, sections, import descriptors, hint/name tables, and an entry trampoline that calls `main` and exits through `ExitProcess`.
+
+The import resolver scans installed Windows SDK/MSVC `.lib` files, reads COFF short import objects, and maps referenced symbols to their DLLs. This replaces the old hard-coded function-to-DLL table.
+
+## Current Limits
+
+Known gaps include:
+
+- Incomplete C standard coverage
+- Limited diagnostics and type checking
+- No object-file output or multi-file linker
+- No debug info
+- Limited floating-point support
+- Partial ABI support for complex aggregate passing/returning
+- Limited optimizer behavior
+- Partial MSVC/GNU extension coverage
+
+## Project Layout
+
+- `src/main.rs`: CLI and pipeline driver
+- `src/preprocessor/`: macro expansion and include handling
+- `src/lexer/`: tokenization
+- `src/parser/`: AST parser and PCH serialization
+- `src/ir/`: IR definitions and lowering
+- `src/codegen/`: machine instruction selection and encoding
+- `src/linker/`: PE writer and SDK/MSVC import-library resolver
+- `sysinfo.c`: Windows system information CLI compiled by this compiler
+
+## Verification
+
+Useful smoke test:
+
+```powershell
+cargo check
+cargo run -- sysinfo.c out.exe
+.\out.exe
+```
