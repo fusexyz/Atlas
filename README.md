@@ -124,8 +124,8 @@ Most hobby compilers stop at either generating C or targeting a custom VM. Atlas
 # Build the compiler
 cargo build --release
 
-# Compile and link in one step
-./target/release/compiler sysinfo.c -o sysinfo.exe
+# Compile and link multiple files in one step
+./target/release/compiler examples/sysinfo.c examples/sysinfo_format.c -o sysinfo.exe
 
 # Run it
 ./sysinfo.exe
@@ -134,11 +134,11 @@ cargo build --release
 **Separate compilation:**
 ```bash
 # Compile each file to a .obj
-./target/release/compiler -c foo.c -o foo.obj
-./target/release/compiler -c bar.c -o bar.obj
+./target/release/compiler -c examples/sysinfo.c -o sysinfo.obj
+./target/release/compiler -c examples/sysinfo_format.c -o sysinfo_format.obj
 
 # Link them together
-./target/release/compiler foo.obj bar.obj -o app.exe
+./target/release/compiler sysinfo.obj sysinfo_format.obj -o sysinfo.exe
 ```
 
 **Precompiled headers:**
@@ -161,44 +161,73 @@ compiler [-c] <file.c|file.obj>... [-o output]
 
 ## Example
 
-`sysinfo.c` — included in the repo. Calls real Win32 APIs with struct pointer arguments, uses `#include <stdio.h>` resolved against your actual SDK headers, and exercises printf with multiple format specifiers.
+`examples/sysinfo.c` + `examples/sysinfo_format.c` — a two-file demo that calls real Win32 APIs. It uses `#include <windows.h>` resolved against your installed SDK, exercises structs and unions from the Windows headers (`MEMORYSTATUSEX`, `SYSTEM_INFO`), and splits helper functions into a separate translation unit to demonstrate multi-file compilation.
 
+`examples/sysinfo.c`:
 ```c
 #include <stdio.h>
 #include <time.h>
-
-typedef unsigned int       DWORD;
-typedef unsigned long long DWORDLONG;
-
-struct MEMORYSTATUSEX {
-    DWORD     dwLength;
-    DWORD     dwMemoryLoad;
-    DWORDLONG ullTotalPhys;
-    DWORDLONG ullAvailPhys;
-    // ...
-};
-
-extern int  GlobalMemoryStatusEx(struct MEMORYSTATUSEX* lpBuffer);
-extern int  GetComputerNameA(char* lpBuffer, DWORD* nSize);
+#include <windows.h>
+#include "sysinfo.h"
 
 int main() {
     char computer[256];
-    DWORD sz = 256;
-    struct MEMORYSTATUSEX mem;
-    mem.dwLength = sizeof(struct MEMORYSTATUSEX);
+    char user[256];
+    DWORD computer_size = 256;
+    DWORD user_size = 256;
+    MEMORYSTATUSEX mem;
+    SYSTEM_INFO sys;
+    unsigned long long free_to_user = 0, disk_total = 0, disk_free = 0;
 
-    time_t now = time(NULL);
+    time_t now = time(0);
     struct tm* lt = localtime(&now);
-    printf("Date: %04d-%02d-%02d\n", lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
+    printf("[*] Local System Time:\n");
+    printf("    Date: %04d-%02d-%02d (YYYY-MM-DD)\n", lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
+    printf("    Time: %02d:%02d:%02d\n\n", lt->tm_hour, lt->tm_min, lt->tm_sec);
 
-    if (GetComputerNameA(&computer[0], &sz))
-        printf("Host: %s\n", &computer[0]);
+    printf("[*] Host Identity:\n");
+    if (GetComputerNameA(&computer[0], &computer_size))
+        printf("    Host Computer Name: %s\n", &computer[0]);
+    if (GetUserNameA(&user[0], &user_size))
+        printf("    Current User: %s\n\n", &user[0]);
 
-    if (GlobalMemoryStatusEx(&mem))
-        printf("RAM: %llu MiB total, %llu MiB free\n",
-               mem.ullTotalPhys / 1024 / 1024,
-               mem.ullAvailPhys / 1024 / 1024);
+    mem.dwLength = sizeof(MEMORYSTATUSEX);
+    printf("[*] Physical Memory (RAM):\n");
+    if (GlobalMemoryStatusEx(&mem)) {
+        printf("    Total RAM: %llu MiB\n", to_mib(mem.ullTotalPhys));
+        printf("    Avail RAM: %llu MiB\n", to_mib(mem.ullAvailPhys));
+        printf("    Memory Load: %lu%%\n\n", mem.dwMemoryLoad);
+    }
+
+    GetSystemInfo(&sys);
+    printf("[*] CPU and Architecture:\n");
+    print_architecture(sys.u.s.wProcessorArchitecture);
+    printf("    Processor Cores: %lu\n\n", sys.dwNumberOfProcessors);
+
+    printf("[*] Storage Status (C:\\):\n");
+    if (GetDiskFreeSpaceExA("C:\\", &free_to_user, &disk_total, &disk_free)) {
+        printf("    Total Capacity: %llu MiB\n", to_mib(disk_total));
+        printf("    Free Disk Space: %llu MiB\n\n", to_mib(disk_free));
+    }
     return 0;
+}
+```
+
+`examples/sysinfo_format.c`:
+```c
+#include <stdio.h>
+#include "sysinfo.h"
+
+unsigned long long to_mib(unsigned long long bytes) {
+    return bytes / 1024 / 1024;
+}
+
+void print_architecture(WORD arch) {
+    if (arch == 9)       printf("    Architecture: x64 (AMD64)\n");
+    else if (arch == 5)  printf("    Architecture: ARM\n");
+    else if (arch == 12) printf("    Architecture: ARM64\n");
+    else if (arch == 0)  printf("    Architecture: x86\n");
+    else                 printf("    Architecture: Unknown (%d)\n", arch);
 }
 ```
 
@@ -213,9 +242,16 @@ int main() {
 
 [*] Physical Memory (RAM):
     Total RAM: 32678 MiB
-    Active RAM: 14203 MiB
     Avail RAM: 18475 MiB
     Memory Load: 43%
+
+[*] CPU and Architecture:
+    Architecture: x64 (AMD64)
+    Processor Cores: 16
+
+[*] Storage Status (C:\):
+    Total Capacity: 476837 MiB
+    Free Disk Space: 123456 MiB
 ```
 
 ---
@@ -403,12 +439,14 @@ Instead of a hardcoded function-to-DLL table, Atlas discovers the mapping dynami
 - Windows SDK and/or MSVC toolchain if you want `#include <windows.h>` to resolve
 
 ```bash
-git clone https://github.com/fusexyz/atlas
-cd atlas
+git clone https://github.com/fusexyz/Atlas
+cd Atlas
 cargo build --release
 ```
 
 The binary is at `target/release/compiler.exe`. No build scripts, no code generation, no external tools involved.
+
+Demo examples are in `examples/` — `sysinfo.c` and `sysinfo_format.c` demonstrate a real two-file Windows program compiled with Atlas.
 
 ---
 
