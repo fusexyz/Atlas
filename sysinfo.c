@@ -14,9 +14,6 @@ int main() {
     unsigned long long disk_total = 0;
     unsigned long long disk_free = 0;
 
-    printf("==================================================\n");
-    printf("        System Information Diagnostic              \n");
-    printf("==================================================\n\n");
 
     time_t now = time(0);
     struct tm* lt = localtime(&now);
@@ -63,9 +60,6 @@ int main() {
         printf("    Disk status unavailable\n\n");
     }
 
-    printf("==================================================\n");
-    printf(" Diagnostics Completed.\n");
-    printf("==================================================\n");
 
     return 0;
 }
