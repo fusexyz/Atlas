@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Architecture — Atlas</title>
+  <meta name="description" content="Technical reference for every stage of the Atlas compiler pipeline.">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <header>
+    <div class="nav-inner">
+      <a href="index.html" class="logo">ATLAS</a>
+      <div class="nav-links">
+        <a href="architecture.html" class="active">architecture</a>
+        <a href="subset.html">c-subset</a>
+        <a href="https://github.com/fusexyz/Atlas" target="_blank">github ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+
+    <div class="page-hdr">
+      <div class="wrap">
+        <p class="ph-trail">ATLAS / TECHNICAL REFERENCE</p>
+        <h1>Architecture</h1>
+        <p class="subtitle">A walkthrough of every stage in the compiler pipeline.</p>
+        <p class="ph-stats">sections: 10 &nbsp;·&nbsp; src: ~11 files &nbsp;·&nbsp; impl: Rust</p>
+      </div>
+    </div>
+
+    <div class="wrap">
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§01</span>
+          <span class="arch-name">PREPROCESSOR</span>
+          <span class="arch-src">src/preprocessor/</span>
+        </div>
+        <div class="arch-body">
+          <p>Runs before the lexer and produces a clean token stream with all directives resolved. The preprocessor is a
+            complete implementation — not a stub.</p>
+          <ul>
+            <li><strong>Macro expansion</strong> — object-like and function-like macros with correct rescanning,
+              argument substitution, and expansion guards to prevent infinite recursion</li>
+            <li><strong>Variadic macros</strong> — <code>__VA_ARGS__</code> with correct expansion and stringification
+            </li>
+            <li><strong>Token pasting and stringification</strong> — <code>##</code> and <code>#</code> inside macro
+              bodies</li>
+            <li><strong><code>#include</code> resolution</strong> — recursive with cycle detection; searches the source
+              file's directory first, then system paths discovered at runtime</li>
+            <li><strong>Conditional compilation</strong> — <code>#ifdef</code>, <code>#ifndef</code>, <code>#if</code>,
+              <code>#elif</code>, <code>#else</code>, <code>#endif</code> backed by a full expression evaluator
+              supporting <code>defined()</code>, arithmetic, bitwise, and logical operators</li>
+            <li><strong><code>#pragma pack</code></strong> — push/pop stack; emits sentinel tokens
+              (<code>__pragma_pack_push_N</code>, <code>__pragma_pack_pop</code>) consumed by the parser</li>
+            <li><strong>Predefined macros</strong> — <code>_WIN32</code>, <code>_WIN64</code>, <code>_MSC_VER</code>
+              (1930), <code>_M_AMD64</code>, <code>__STDC__</code>, <code>__cdecl</code>, <code>__declspec(x)</code>,
+              <code>NULL</code>, and others Windows SDK headers depend on</li>
+            <li><strong>SDK/MSVC discovery</strong> — reads <code>%INCLUDE%</code>, walks
+              <code>Program Files (x86)/Windows Kits/10/Include/&lt;latest&gt;/ucrt|shared|um|winrt</code> and Visual
+              Studio MSVC include paths; <code>#include &lt;windows.h&gt;</code> resolves without any configuration</li>
+            <li><strong>Line continuation</strong> — backslash-newline splicing before tokenization</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§02</span>
+          <span class="arch-name">LEXER</span>
+          <span class="arch-src">src/lexer/</span>
+        </div>
+        <div class="arch-body">
+          <p>Hand-written tokenizer with full line/column tracking for error messages. Handles all C tokens:</p>
+          <ul>
+            <li>Hex literals (<code>0x...</code>), integer/float suffixes (<code>ULL</code>, <code>f</code>,
+              <code>L</code>)</li>
+            <li>All escape sequences in string and character literals</li>
+            <li>Full set of compound-assignment operators, bitwise operators, <code>-&gt;</code>, <code>...</code></li>
+            <li>Every span records a line and column, propagated through parsing to semantic errors</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§03</span>
+          <span class="arch-name">PARSER</span>
+          <span class="arch-src">src/parser/</span>
+        </div>
+        <div class="arch-body">
+          <p>Recursive-descent parser that builds a typed AST. Typedef-name tracking resolves the classic
+            type-vs-identifier ambiguity at parse time.</p>
+          <h3>Declarations</h3>
+          <ul>
+            <li>Functions, local and global variables, structs, unions, enums, typedefs, forward declarations</li>
+            <li>Storage classes: <code>extern</code>, <code>static</code>, <code>auto</code>, <code>register</code></li>
+            <li><code>static</code> and <code>inline</code> function definitions are treated as declarations — bodies
+              are parsed but discarded. This allows SDK headers containing inline helpers to parse cleanly.</li>
+          </ul>
+          <h3>Statements</h3>
+          <ul>
+            <li><code>if</code>/<code>else</code>, <code>while</code>, <code>do-while</code>, <code>for</code>,
+              <code>switch</code>/<code>case</code>/<code>default</code></li>
+            <li><code>break</code>, <code>continue</code>, <code>goto</code>, labeled statements, <code>return</code>
+            </li>
+          </ul>
+          <h3>Expressions</h3>
+          <ul>
+            <li>Correct precedence via precedence climbing</li>
+            <li>Binary, unary, ternary, casts, <code>sizeof</code>, <code>alignof</code></li>
+            <li>Address-of, dereference, struct member (<code>.</code> and <code>-&gt;</code>), array index, function
+              call</li>
+            <li>All assignment operators: <code>=</code>, <code>+=</code>, <code>-=</code>, <code>*=</code>,
+              <code>/=</code>, <code>%=</code>, <code>&amp;=</code>, <code>|=</code>, <code>^=</code>,
+              <code>&lt;&lt;=</code>, <code>&gt;&gt;=</code></li>
+          </ul>
+          <h3>MSVC extensions</h3>
+          <ul>
+            <li><code>__declspec</code>, <code>__stdcall</code>, <code>__cdecl</code>, <code>__fastcall</code>,
+              <code>__int8/16/32/64</code></li>
+            <li><code>__forceinline</code>, <code>__pragma</code>, <code>__attribute__</code>, <code>__unaligned</code>
+            </li>
+            <li>Enum constant evaluation with compile-time integer expression folding</li>
+          </ul>
+          <h3>Precompiled headers</h3>
+          <p>Binary serialization (<code>COMPPCH\x01</code>) of the full parsed AST, all active macro definitions,
+            typedef names, and enum constants. <code>--make-pch</code> writes, <code>--use-pch</code> loads. Eliminates
+            repeated parsing of heavy header files.</p>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§04</span>
+          <span class="arch-name">SEMA</span>
+          <span class="arch-src">src/sema.rs</span>
+        </div>
+        <div class="arch-body">
+          <p>Dedicated type-checking pass that runs after parsing and before IR lowering.</p>
+          <h3>Collection pass</h3>
+          <ul>
+            <li>Typedefs resolved first, then struct field maps, then function signatures and globals</li>
+            <li>Typedef cycles detected and reported</li>
+          </ul>
+          <h3>Check pass</h3>
+          <ul>
+            <li>All function bodies checked with a stack of scopes for correct variable resolution</li>
+            <li>Binary/unary expression types validated (arithmetic, pointer, logical)</li>
+            <li>Assignment compatibility: same-type, arithmetic-to-arithmetic, pointer-to-pointer, integer-to-pointer
+            </li>
+            <li>Lvalue requirements enforced on assignment LHS and address-of operands</li>
+            <li>Argument counts checked against function signatures; variadic requires at least the declared number</li>
+            <li><code>switch</code> expression required to be integer-typed</li>
+            <li>Duplicate parameters detected</li>
+            <li>Errors reported as <code>type error at line:col: message</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§05</span>
+          <span class="arch-name">IR</span>
+          <span class="arch-src">src/ir/</span>
+        </div>
+        <div class="arch-body">
+          <p>Typed, flat intermediate representation with explicit basic blocks.</p>
+          <h3>Types</h3>
+          <p><code>void</code> &nbsp;<code>i8</code> &nbsp;<code>i16</code> &nbsp;<code>i32</code>
+            &nbsp;<code>i64</code> &nbsp;<code>f32</code> &nbsp;<code>f64</code> &nbsp;<code>ptr(T)</code>
+            &nbsp;<code>array(T, N)</code></p>
+          <h3>Instructions</h3>
+          <p><code>alloca</code> &nbsp;<code>load</code> &nbsp;<code>store</code> &nbsp;<code>binop</code>
+            &nbsp;<code>unaryop</code> &nbsp;<code>call</code> &nbsp;<code>gep</code> &nbsp;<code>cast</code>
+            &nbsp;<code>copy</code></p>
+          <h3>Terminators</h3>
+          <p><code>ret</code> &nbsp;<code>br</code> &nbsp;<code>condbr</code> &nbsp;<code>unreachable</code></p>
+          <h3>Lowering</h3>
+          <ul>
+            <li>Struct field offsets and sizes computed with correct natural alignment and <code>#pragma pack</code>
+              overrides</li>
+            <li>Union fields all map to offset 0; struct size padded to the largest alignment, then rounded up</li>
+            <li>Anonymous struct/union fields flattened into the parent namespace</li>
+            <li>Struct definitions processed in dependency order to handle forward references</li>
+            <li>String literals pooled with automatic null termination</li>
+            <li>Globals with constant initializers emitted to <code>.data</code>; <code>extern</code> globals become
+              extern IR functions</li>
+            <li><code>break</code>/<code>continue</code> resolved through loop exit/condition block stacks</li>
+          </ul>
+          <h3>IR dump (example)</h3>
+          <pre>fn @add(%0: i32, %1: i32) -> i32 {
+  bb0:
+    %2 = alloca i32
+    %3 = alloca i32
+    store i32 %0, ptr %2
+    store i32 %1, ptr %3
+    %4 = load i32, ptr %2
+    %5 = load i32, ptr %3
+    %6 = Add i32 %4, %5
+    ret %6
+}</pre>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§06</span>
+          <span class="arch-name">CODEGEN</span>
+          <span class="arch-src">src/codegen/codegen.rs</span>
+        </div>
+        <div class="arch-body">
+          <p>Translates IR into machine instructions following the Microsoft x64 ABI.</p>
+          <h3>Calling convention</h3>
+          <ul>
+            <li>First four integer/pointer arguments in <code>RCX</code>, <code>RDX</code>, <code>R8</code>,
+              <code>R9</code>; arguments 5+ spilled to stack at <code>[RSP + 8*i]</code></li>
+            <li>32-byte shadow space allocated before every <code>call</code></li>
+            <li>Return value in <code>RAX</code></li>
+            <li>Stack kept 16-byte aligned before every <code>call</code></li>
+          </ul>
+          <h3>Frame layout</h3>
+          <ul>
+            <li>Every virtual register gets a fixed <code>[RBP - N]</code> slot — spill-everything, no register
+              allocator</li>
+            <li>Frame size computed as: <code>round_up(vreg_slots + alloca_bytes + out_arg_bytes, 16)</code></li>
+          </ul>
+          <h3>Sized memory operations</h3>
+          <ul>
+            <li>1-byte: <code>MOV8</code> (store), <code>MOVZX8</code> (load with zero-extend)</li>
+            <li>2-byte: <code>MOV16</code>, <code>MOVZX16</code></li>
+            <li>4-byte: <code>MOV32</code></li>
+            <li>8-byte: <code>MOV</code></li>
+            <li>Selected by <code>ty.size_bytes()</code> from the IR load/store instruction</li>
+          </ul>
+          <h3>Notable patterns</h3>
+          <ul>
+            <li>Comparisons: <code>CMP</code> + <code>SETcc</code> + <code>MOVZX</code> → clean 0/1 integer result</li>
+            <li>Division/modulo: <code>CQO</code> + <code>IDIV</code>; modulo copies <code>RDX</code> to
+              <code>RAX</code></li>
+            <li>External DLL calls: <code>FF 15 rel32</code> (RIP-relative indirect through IAT slot)</li>
+            <li>Internal calls: <code>E8 rel32</code> (direct relative call)</li>
+            <li>Function pointer calls: <code>CALL RAX</code></li>
+            <li><code>__va_start</code> intrinsic: spills the four argument registers
+              (<code>RCX</code>/<code>RDX</code>/<code>R8</code>/<code>R9</code>) into the caller shadow space area so
+              <code>va_arg</code> can walk them sequentially</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§07</span>
+          <span class="arch-name">PEEPHOLE</span>
+          <span class="arch-src">src/codegen/opt.rs</span>
+        </div>
+        <div class="arch-body">
+          <p>Runs after codegen, before encoding. Operates on the flat machine instruction list.</p>
+          <ul>
+            <li>Tracks a <code>HashMap&lt;i32, Operand&gt;</code> of known values for each <code>[RBP+N]</code> stack
+              slot</li>
+            <li>Eliminates <code>mov reg, [rbp+N]</code> when the slot was just written with that register's value</li>
+            <li>Removes <code>mov r, r</code> no-op self-moves</li>
+            <li>Invalidates the slot cache on labels, jumps, and calls</li>
+            <li>Calls <code>invalidate_reg</code> when a register is clobbered, removing all cache entries that
+              reference it</li>
+            <li>Runs the <code>peephole</code> pass in a loop until the instruction list stops changing (fixed point)
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§08</span>
+          <span class="arch-name">ENCODER</span>
+          <span class="arch-src">src/codegen/encode.rs</span>
+        </div>
+        <div class="arch-body">
+          <p>Emits raw x86-64 bytes from the machine instruction list. No textual assembly intermediate anywhere in the
+            pipeline.</p>
+          <h3>Encoding details</h3>
+          <ul>
+            <li><strong>REX prefixes</strong> — <code>REX.W</code> for 64-bit operands;
+              <code>REX.R</code>/<code>REX.B</code> for R8–R15; 8-bit operations check <code>needs_rex_8</code> for
+              registers requiring a REX byte (SPL, BPL, SIL, DIL)</li>
+            <li><strong>ModR/M</strong> — register-register (<code>mod=11</code>), register-memory with base register,
+              RIP-relative (<code>mod=00 rm=101</code>)</li>
+            <li><strong>SIB</strong> — emitted when base register is <code>RSP</code> (<code>rm=100</code>); byte is
+              <code>0x24</code> (no index, base=RSP)</li>
+            <li><strong>Displacement</strong> — 8-bit when the value fits in a signed byte; 32-bit otherwise</li>
+            <li><strong>RIP-relative relocations</strong> — <code>(offset, symbol)</code> pairs recorded per function;
+              patched by the PE writer once section RVAs are finalized</li>
+            <li><strong>Label fixups</strong> — branch targets resolved within the encoder after all instructions are
+              emitted; back-patches the displacement bytes</li>
+          </ul>
+          <h3>Instruction coverage</h3>
+          <p>
+            <code>MOV</code> <code>MOV8</code> <code>MOV16</code> <code>MOV32</code>
+            <code>MOVZX8</code> <code>MOVZX16</code>
+            <code>LEA</code> <code>ADD</code> <code>SUB</code> <code>IMUL</code>
+            <code>AND</code> <code>OR</code> <code>XOR</code>
+            <code>SHL</code> <code>SAR</code>
+            <code>NEG</code> <code>NOT</code>
+            <code>CQO</code> <code>IDIV</code>
+            <code>CMP</code> <code>SETcc</code>
+            <code>PUSH</code> <code>POP</code>
+            <code>CALL</code> <code>JMP</code> <code>Jcc</code> <code>RET</code>
+          </p>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§09</span>
+          <span class="arch-name">OBJECT FORMAT</span>
+          <span class="arch-src">src/linker/object.rs</span>
+        </div>
+        <div class="arch-body">
+          <p>Custom binary format rather than COFF. Magic: <code>CCOBJ001</code>.</p>
+          <h3>Contents per .obj file</h3>
+          <ul>
+            <li>Encoded function bytes and their names</li>
+            <li>Relocation records: <code>(function_name, [(offset, symbol)])</code></li>
+            <li>String literal table: <code>(name, bytes)</code></li>
+            <li>Global variable table: name, IR type, optional initializer value, <code>is_extern</code> flag</li>
+          </ul>
+          <h3>Merge and link</h3>
+          <ul>
+            <li>String literal names scoped with a per-object prefix (<code>.Lobj{idx}_</code>) to prevent collisions
+            </li>
+            <li>Duplicate symbol definitions rejected with a diagnostic</li>
+            <li><code>retain_reachable_symbols</code> performs BFS from <code>main</code> over the relocation graph;
+              unreachable functions, strings, and globals are dropped before writing the PE</li>
+            <li>Pruned counts reported: <code>link: removed N functions, N strings, N globals</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="arch-wrap">
+        <div class="arch-lbl">
+          <span class="arch-num">§10</span>
+          <span class="arch-name">LINKER</span>
+          <span class="arch-src">src/linker/pe.rs<br>src/linker/import_lib.rs</span>
+        </div>
+        <div class="arch-body">
+          <h3>PE32+ writer</h3>
+          <p>Constructs a valid Windows executable from scratch. Layout:</p>
+          <ul>
+            <li>DOS stub — 64-byte minimal header with correct <code>e_lfanew</code></li>
+            <li>PE signature, COFF header — machine type <code>0x8664</code> (AMD64), section count, timestamp</li>
+            <li>Optional header (PE32+) — <code>ImageBase</code> <code>0x140000000</code>, section alignment
+              <code>0x1000</code>, file alignment <code>0x200</code>, console subsystem, data directory entries for
+              import table and IAT</li>
+            <li>Sections: <code>.text</code> (RX), <code>.rdata</code> (R), <code>.data</code> (RW), <code>.idata</code>
+              (R)</li>
+            <li>Import Directory Table — one entry per DLL with
+              <code>OriginalFirstThunk</code>/<code>FirstThunk</code>/<code>Name</code> RVAs</li>
+            <li>IAT — hint/name entries for each imported symbol; slots referenced via <code>FF 15 rel32</code></li>
+            <li>RIP-relative relocations patched after all section RVAs are computed</li>
+          </ul>
+          <h3>Entry trampoline</h3>
+          <pre>and  rsp, -16        ; Windows entry RSP ≡ 8 (mod 16) — align before first call
+call main
+mov  rcx, rax        ; pass return code to ExitProcess
+sub  rsp, 32         ; shadow space for ExitProcess
+call [rip+ExitProcess]</pre>
+          <h3>Import resolver</h3>
+          <ul>
+            <li>Searches <code>%LIB%</code>, <code>Program Files (x86)/Windows Kits/10/lib</code>, Visual Studio MSVC
+              lib paths</li>
+            <li>Opens <code>.lib</code> files as COFF archives; parses archive member headers</li>
+            <li>Identifies COFF Short Import Objects by <code>Sig1=0x0000, Sig2=0xFFFF</code>; extracts symbol name and
+              DLL name</li>
+            <li>Registers both raw symbol and <code>__imp_</code>-prefixed variant</li>
+            <li>Unresolved externs warn: <code>warning: 'foo' not found — use --import DLL:foo</code></li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <footer>
+    <span>ATLAS — C compiler for x86-64 Windows</span>
+    <span>
+      <a href="https://github.com/fusexyz/Atlas" target="_blank">github.com/fusexyz/Atlas</a>
+      &nbsp;·&nbsp; MIT License
+    </span>
+  </footer>
+
+</body>
+
+</html>

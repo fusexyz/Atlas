@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ATLAS — C compiler for x86-64 Windows</title>
+  <meta name="description" content="Atlas: a C compiler written from scratch in Rust. Native PE32+ Windows executables. No LLVM, no linker, zero external dependencies.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <a href="index.html" class="logo">ATLAS</a>
+    <div class="nav-links">
+      <a href="architecture.html">architecture</a>
+      <a href="subset.html">c-subset</a>
+      <a href="https://github.com/fusexyz/Atlas" target="_blank">github ↗</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <section class="hero">
+    <div class="wrap">
+      <h1 class="hero-title">ATLAS</h1>
+      <p class="hero-sub">
+        A C compiler written from scratch in Rust.<br>
+        Targets x86-64 Windows. Produces native PE32+ executables.<br>
+        No LLVM. No assembler. No linker. No external dependencies.
+      </p>
+      <div class="hero-actions">
+        <a href="#quickstart" class="btn">get started</a>
+        <a href="https://github.com/fusexyz/Atlas" class="btn" target="_blank">github ↗</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <p class="sh">Capabilities</p>
+      <div>
+
+        <div class="dl-row">
+          <span class="dl-k">Preprocessor</span>
+          <span class="dl-v">
+            Full macro expansion — object-like, function-like, variadic (<code>__VA_ARGS__</code>).
+            Token pasting (<code>##</code>) and stringification (<code>#</code>).
+            Recursive <code>#include</code> with cycle detection. <code>#ifdef</code>/<code>#if</code>/<code>#elif</code>.
+            <code>#pragma pack</code> push/pop. Automatic discovery of Windows SDK and MSVC
+            include paths — <code>#include &lt;windows.h&gt;</code> resolves without any configuration.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">Semantic analysis</span>
+          <span class="dl-v">
+            Dedicated type-checking pass before IR lowering. Collects function signatures,
+            struct field maps, typedef chains, globals, and enum constants.
+            Validates expressions, assignment compatibility, lvalue requirements,
+            and argument counts. Reports errors as <code>line:col: message</code>.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">Multi-file compilation</span>
+          <span class="dl-v">
+            <code>-c</code> flag compiles a <code>.c</code> file to a custom <code>.obj</code> (magic <code>CCOBJ001</code>).
+            Multiple <code>.c</code> and <code>.obj</code> inputs can be mixed in one command.
+            Dead code elimination via BFS reachability from <code>main</code> over the merged relocation graph.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">PE32+ writer</span>
+          <span class="dl-v">
+            Hand-written PE32+ output — DOS stub, COFF header, optional header,
+            <code>.text</code> / <code>.rdata</code> / <code>.data</code> / <code>.idata</code> sections,
+            import directory, IAT, hint/name entries.
+            Entry trampoline aligns the stack and calls <code>ExitProcess</code>.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">Peephole optimizer</span>
+          <span class="dl-v">
+            Tracks which <code>[RBP+N]</code> stack slots hold known values.
+            Eliminates redundant load-after-store sequences and <code>mov r, r</code> no-ops.
+            Runs to a fixed point before encoding.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">Import resolution</span>
+          <span class="dl-v">
+            Parses installed <code>.lib</code> archives from the Windows SDK and MSVC toolchain.
+            Reads COFF Short Import Objects to map symbol names to DLLs.
+            No hardcoded lookup table. Unknown externs warn with a <code>--import DLL:FUNC</code> hint.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">Precompiled headers</span>
+          <span class="dl-v">
+            Binary serialization of the full parsed AST, all active macro definitions,
+            typedef names, and enum constants. Magic: <code>COMPPCH\x01</code>.
+            Eliminates repeated parsing of heavy SDK headers.
+          </span>
+        </div>
+
+        <div class="dl-row">
+          <span class="dl-k">x86-64 encoder</span>
+          <span class="dl-v">
+            Emits raw bytes from machine IR — REX prefixes, ModR/M, SIB, displacements,
+            RIP-relative relocations patched by the PE writer.
+            8/16/32/64-bit load/store variants. No text assembly stage.
+          </span>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <p class="sh">Pipeline</p>
+      <ul class="pipe-list">
+        <li><span class="pipe-n">01</span><span class="pipe-name">preprocessor</span><span class="pipe-desc">macros · #include · #ifdef · pack</span></li>
+        <li><span class="pipe-n">02</span><span class="pipe-name">lexer</span><span class="pipe-desc">span-tracked tokens</span></li>
+        <li><span class="pipe-n">03</span><span class="pipe-name">parser</span><span class="pipe-desc">recursive descent · full AST</span></li>
+        <li><span class="pipe-n">04</span><span class="pipe-name">semantic analysis</span><span class="pipe-desc">types · scopes · lvalues</span></li>
+        <li><span class="pipe-n">05</span><span class="pipe-name">IR lowering</span><span class="pipe-desc">typed IR · struct layout</span></li>
+        <li><span class="pipe-n">06</span><span class="pipe-name">codegen + peephole</span><span class="pipe-desc">x64 ABI · fixed-point opt</span></li>
+        <li><span class="pipe-n">07</span><span class="pipe-name">encoder</span><span class="pipe-desc">raw x86-64 bytes · relocs</span></li>
+        <li><span class="pipe-n">-c</span><span class="pipe-name">.obj output</span><span class="pipe-desc">CCOBJ001</span></li>
+        <li><span class="pipe-n">08</span><span class="pipe-name">linker → .exe</span><span class="pipe-desc">merge · DCE · PE32+</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" id="quickstart">
+    <div class="wrap">
+      <p class="sh">Quick start</p>
+
+      <div class="qs-block">
+        <p class="qs-label">build</p>
+        <pre>git clone https://github.com/fusexyz/Atlas
+cd Atlas
+cargo build --release</pre>
+      </div>
+
+      <div class="qs-block">
+        <p class="qs-label">compile and link</p>
+        <pre>./target/release/compiler \
+  examples/sysinfo.c examples/sysinfo_format.c \
+  -o sysinfo.exe
+
+./sysinfo.exe</pre>
+      </div>
+
+      <div class="qs-block">
+        <p class="qs-label">separate compilation</p>
+        <pre>./target/release/compiler -c examples/sysinfo.c        -o sysinfo.obj
+./target/release/compiler -c examples/sysinfo_format.c  -o sysinfo_format.obj
+./target/release/compiler sysinfo.obj sysinfo_format.obj -o sysinfo.exe</pre>
+      </div>
+
+      <div class="qs-block">
+        <p class="qs-label">all flags</p>
+        <pre>compiler [-c] &lt;file.c|file.obj&gt;... [-o output]
+         [--import DLL:FUNC ...]
+         [--make-pch FILE] [--use-pch FILE]</pre>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <p class="sh">Example output</p>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:.9rem;">
+        examples/sysinfo.c + sysinfo_format.c — Win32 APIs via <code>#include &lt;windows.h&gt;</code>
+      </p>
+      <pre>[*] Local System Time:
+    Date: 2026-06-10 (YYYY-MM-DD)
+    Time: 14:23:07
+
+[*] Host Identity:
+    Host Computer Name: DESKTOP-XYZ
+    Current User: fuse
+
+[*] Physical Memory (RAM):
+    Total RAM: 32678 MiB
+    Avail RAM: 18475 MiB
+    Memory Load: 43%
+
+[*] CPU and Architecture:
+    Architecture: x64 (AMD64)
+    Processor Cores: 16
+
+[*] Storage Status (C:\):
+    Total Capacity: 476837 MiB
+    Free Disk Space: 123456 MiB</pre>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span>ATLAS — C compiler for x86-64 Windows · MIT</span>
+  <span><a href="https://github.com/fusexyz/Atlas" target="_blank">github.com/fusexyz/Atlas</a></span>
+</footer>
+
+</body>
+</html>

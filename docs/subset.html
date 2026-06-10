@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>C Subset — Atlas</title>
+  <meta name="description" content="What C features Atlas currently supports, what is partially implemented, and what is planned.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="nav-inner">
+    <a href="index.html" class="logo">ATLAS</a>
+    <div class="nav-links">
+      <a href="architecture.html">architecture</a>
+      <a href="subset.html" class="active">c-subset</a>
+      <a href="https://github.com/fusexyz/Atlas" target="_blank">github ↗</a>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <div class="page-hdr">
+    <div class="wrap">
+      <p class="ph-trail">ATLAS / C SUBSET</p>
+      <h1>C Subset</h1>
+      <p class="subtitle">Current feature coverage. Target: practical C99 + MSVC extensions.</p>
+      <p class="ph-stats">
+        <b>IMPL</b>: implemented &nbsp;·&nbsp;
+        <b>PART</b>: parsed, not fully lowered &nbsp;·&nbsp;
+        <b>TODO</b>: not supported
+      </p>
+    </div>
+  </div>
+
+  <section class="section">
+    <div class="wrap">
+
+      <p class="feat-stats">
+        entries: 38 &nbsp;&nbsp;
+        <b style="color:var(--green)">IMPL: 28</b> &nbsp;&nbsp;
+        <b style="color:var(--amber)">PART: 4</b> &nbsp;&nbsp;
+        <b style="color:var(--dim)">TODO: 6</b>
+      </p>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>feature</th>
+              <th>status</th>
+              <th>notes</th>
+            </tr>
+          </thead>
+          <tbody>
+
+            <tr class="tbl-grp"><td colspan="3">TYPES</td></tr>
+            <tr>
+              <td><code>int</code>, <code>char</code>, <code>short</code>, <code>long</code>, <code>long long</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>unsigned</code> variants</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>float</code>, <code>double</code></td>
+              <td><span class="s-part">PART</span></td>
+              <td><span class="s-note">parsing, IR, and type checking only — codegen (SSE2) not implemented</span></td>
+            </tr>
+            <tr>
+              <td>Pointers and pointer arithmetic</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Arrays (fixed size)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>struct</code> and <code>union</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Anonymous struct/union fields</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">flattened into parent namespace during IR lowering</span></td>
+            </tr>
+            <tr>
+              <td><code>enum</code> with constant expressions</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">constants folded at parse time</span></td>
+            </tr>
+            <tr>
+              <td><code>typedef</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">cycle detection; multiple declarators per typedef</span></td>
+            </tr>
+            <tr>
+              <td>Bitfields</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td></td>
+            </tr>
+
+            <tr class="tbl-grp"><td colspan="3">CONTROL FLOW</td></tr>
+            <tr>
+              <td><code>if</code> / <code>else</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>while</code>, <code>do-while</code>, <code>for</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>switch</code> / <code>case</code> / <code>default</code></td>
+              <td><span class="s-part">PART</span></td>
+              <td><span class="s-note">parsed and type-checked; IR lowering not yet implemented</span></td>
+            </tr>
+            <tr>
+              <td><code>break</code>, <code>continue</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>goto</code> and labeled statements</td>
+              <td><span class="s-part">PART</span></td>
+              <td><span class="s-note">parsed; IR lowering not yet implemented</span></td>
+            </tr>
+            <tr>
+              <td><code>return</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+
+            <tr class="tbl-grp"><td colspan="3">FUNCTIONS</td></tr>
+            <tr>
+              <td>Function definitions and calls</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Variadic functions (<code>...</code>, <code>va_list</code>)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note"><code>__va_start</code> intrinsic; arg registers spilled to shadow space</span></td>
+            </tr>
+            <tr>
+              <td>Function pointers and indirect calls</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note"><code>CALL RAX</code></span></td>
+            </tr>
+            <tr>
+              <td>More than 4 arguments</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">args 5+ spilled to stack per x64 ABI</span></td>
+            </tr>
+
+            <tr class="tbl-grp"><td colspan="3">EXPRESSIONS</td></tr>
+            <tr>
+              <td>All binary operators</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">arithmetic, bitwise, logical, comparison, comma</span></td>
+            </tr>
+            <tr>
+              <td>All assignment operators</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note"><code>= += -= *= /= %= &amp;= |= ^= &lt;&lt;= &gt;&gt;=</code></span></td>
+            </tr>
+            <tr>
+              <td>Increment / decrement (<code>++</code>, <code>--</code>)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">pre and post forms</span></td>
+            </tr>
+            <tr>
+              <td>Ternary operator</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Casts</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>sizeof</code>, <code>alignof</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">correct struct alignment semantics with <code>#pragma pack</code></span></td>
+            </tr>
+            <tr>
+              <td>Struct member access (<code>.</code> and <code>-&gt;</code>)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Address-of, dereference</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Struct/array initializer lists (<code>{1, 2, 3}</code>)</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td></td>
+            </tr>
+
+            <tr class="tbl-grp"><td colspan="3">PREPROCESSOR</td></tr>
+            <tr>
+              <td><code>#define</code> macros (object and function-like)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Variadic macros (<code>__VA_ARGS__</code>)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Token pasting (<code>##</code>) and stringification (<code>#</code>)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>#include</code> — local and system headers</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>#ifdef</code> / <code>#ifndef</code> / <code>#if</code> / <code>#elif</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td><code>#pragma pack</code></td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">push/pop stack; both <code>#pragma pack</code> and <code>__pragma(pack(...))</code> forms</span></td>
+            </tr>
+            <tr>
+              <td>Windows SDK headers (<code>&lt;windows.h&gt;</code>, <code>&lt;stdio.h&gt;</code>, etc.)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">SDK paths discovered at runtime from environment</span></td>
+            </tr>
+            <tr>
+              <td>MSVC extension keywords</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note"><code>__declspec</code> <code>__cdecl</code> <code>__stdcall</code> <code>__int64</code> <code>__forceinline</code> ...</span></td>
+            </tr>
+
+            <tr class="tbl-grp"><td colspan="3">COMPILER FEATURES</td></tr>
+            <tr>
+              <td>Multi-file compilation (<code>-c</code> + link)</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">custom <code>CCOBJ001</code> object format</span></td>
+            </tr>
+            <tr>
+              <td>Dead code elimination</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">BFS reachability from <code>main</code> over merged reloc graph</span></td>
+            </tr>
+            <tr>
+              <td>Peephole optimizer</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">stack value tracking, runs to fixed point</span></td>
+            </tr>
+            <tr>
+              <td>Precompiled headers</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">binary AST + macro + typedef + enum serialization</span></td>
+            </tr>
+            <tr>
+              <td>Semantic type checker</td>
+              <td><span class="s-impl">IMPL</span></td>
+              <td><span class="s-note">line:col errors before IR lowering</span></td>
+            </tr>
+            <tr>
+              <td>Register allocator</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td><span class="s-note">currently spills everything to <code>[RBP-N]</code></span></td>
+            </tr>
+            <tr>
+              <td>Float/double codegen (SSE2)</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>VLAs</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Inline assembly</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Debug info (CodeView / PDB)</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Linux ELF target</td>
+              <td><span class="s-todo">TODO</span></td>
+              <td><span class="s-note">System V AMD64 ABI</span></td>
+            </tr>
+
+          </tbody>
+        </table>
+      </div>
+
+      <h2 style="font-size:.8rem;letter-spacing:.1em;color:var(--muted);margin-top:3rem;margin-bottom:0;font-weight:normal;">// roadmap</h2>
+      <ul class="roadmap">
+        <li><code>switch</code> statement lowering to conditional branches</li>
+        <li><code>goto</code> and labeled <code>break</code>/<code>continue</code></li>
+        <li>Struct and array initializer lists (<code>{1, 2, 3}</code>)</li>
+        <li>Floating-point codegen (SSE2)</li>
+        <li>Bitfield support</li>
+        <li>Register allocator (linear scan)</li>
+        <li>Stronger constant propagation and dead-store elimination</li>
+        <li>Debug info (CodeView / PDB)</li>
+        <li>Linux ELF target (System V AMD64 ABI)</li>
+        <li>Test suite with expected-output <code>.c</code> files</li>
+      </ul>
+
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span>ATLAS — C compiler for x86-64 Windows</span>
+  <span>
+    <a href="https://github.com/fusexyz/Atlas" target="_blank">github.com/fusexyz/Atlas</a>
+    &nbsp;·&nbsp; MIT License
+  </span>
+</footer>
+
+</body>
+</html>
