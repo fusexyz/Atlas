@@ -209,7 +209,7 @@ int main() {
 
 [*] Host Identity:
     Host Computer Name: DESKTOP-XYZ
-    Current User: ben
+    Current User: fuse
 
 [*] Physical Memory (RAM):
     Total RAM: 32678 MiB
