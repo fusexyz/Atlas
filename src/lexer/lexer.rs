@@ -53,7 +53,7 @@ impl Lexer {
     fn skip_whitespace_and_comments(&mut self) -> Result<(), LexError> {
         loop {
             match self.peek() {
-                Some(' ') | Some('\t') | Some('\r') | Some('\n') => {
+                Some(' ') | Some('\t') | Some('\r') | Some('\n') | Some('\x0c') => {
                     self.advance();
                 }
                 Some('/') if self.peek_next() == Some('/') => {

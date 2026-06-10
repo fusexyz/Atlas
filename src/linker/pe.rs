@@ -175,6 +175,21 @@ pub fn write_pe(
         for r in relocs {
             let slot_abs = fbase + r.offset;
 
+            if slot_abs >= 2
+                && text[slot_abs - 2] == 0xFF
+                && text[slot_abs - 1] == 0x15
+                && let Some(&f_off) = func_base.get(&r.symbol)
+            {
+                let call_off = slot_abs - 2;
+                let target_rva = text_va as u64 + f_off as u64;
+                let instr_end_rva = text_va as u64 + call_off as u64 + 5;
+                let rel32 = (target_rva as i64 - instr_end_rva as i64) as i32;
+                text[call_off] = 0xE8;
+                put_i32(&mut text, call_off + 1, rel32);
+                text[call_off + 5] = 0x90;
+                continue;
+            }
+
             let sym_rva: u64 = if let Some(&iat_rva) = iat_slots.get(&r.symbol) {
                 iat_rva as u64
             } else if let Some(&f_off) = func_base.get(&r.symbol) {

@@ -1,127 +1,436 @@
-# Hand-Rolled C to PE Compiler
+# Atlas
 
-A self-contained C compiler written in Rust that compiles C source directly into native 64-bit Windows PE executables.
+![Language](https://img.shields.io/badge/language-Rust-orange?style=flat-square)
+![Target](https://img.shields.io/badge/target-x86--64%20Windows-blue?style=flat-square)
+![Output](https://img.shields.io/badge/output-PE32%2B-green?style=flat-square)
+![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square)
 
-There is no LLVM, no NASM, and no external linker in the compile path. The compiler owns the pipeline from source text to PE32+ bytes:
+A standalone C compiler written from scratch in Rust that targets 64-bit Windows. Atlas takes `.c` source files and produces native PE32+ executables — no LLVM, no external assembler, no system linker, no third-party crates. Every stage of the pipeline, from preprocessor to binary PE writer, lives inside a single self-contained binary.
 
-```text
-C source -> preprocessor -> lexer -> parser -> IR lowering -> x86-64 codegen -> PE writer -> runnable EXE
+---
+
+## Pipeline
+
+```
+ ┌─────────────────┐
+ │   .c source(s)  │
+ └────────┬────────┘
+          │
+          ▼
+ ┌─────────────────────────────────────┐
+ │  Preprocessor                       │
+ │  macros · #include · #ifdef · pack  │
+ │  variadic macros · SDK discovery    │
+ └────────┬────────────────────────────┘
+          │  preprocessed token stream
+          ▼
+ ┌─────────────────────────────────────┐
+ │  Lexer                              │
+ │  keywords · literals · operators   │
+ └────────┬────────────────────────────┘
+          │  token list
+          ▼
+ ┌─────────────────────────────────────┐
+ │  Parser                             │
+ │  recursive descent · full AST       │
+ │  MSVC extensions · PCH support      │
+ └────────┬────────────────────────────┘
+          │  AST
+          ▼
+ ┌─────────────────────────────────────┐
+ │  Semantic Analysis                  │
+ │  type checking · scope resolution  │
+ │  function signatures · lvalue check │
+ └────────┬────────────────────────────┘
+          │  validated AST
+          ▼
+ ┌─────────────────────────────────────┐
+ │  IR Lowering                        │
+ │  typed IR · struct layout           │
+ │  const folding · string pooling     │
+ └────────┬────────────────────────────┘
+          │  IR module
+          ▼
+ ┌─────────────────────────────────────┐
+ │  Codegen                            │
+ │  Microsoft x64 ABI                  │
+ │  sized memory ops · peephole opt    │
+ └────────┬────────────────────────────┘
+          │  machine instructions
+          ▼
+ ┌─────────────────────────────────────┐
+ │  Encoder                            │
+ │  direct x86-64 byte emission        │
+ │  REX · ModR/M · SIB · relocs        │
+ └────────┬────────────────────────────┘
+          │
+     ┌────┴─────────────────────┐
+     │  -c mode                 │  full link mode
+     ▼                          ▼
+ ┌──────────┐       ┌────────────────────────────┐
+ │  .obj    │──────▶│  Linker                    │
+ └──────────┘       │  merge · dead code elim    │
+                    │  import resolve · PE write  │
+                    └────────────┬───────────────┘
+                                 │
+                                 ▼
+                            ┌─────────┐
+                            │  .exe   │
+                            └─────────┘
 ```
 
-## What It Can Do
+---
 
-- Compile C directly to a Windows x64 `.exe`
-- Emit PE32+ files with `.text`, `.rdata`, `.data`, and `.idata` sections
-- Generate x86-64 machine code for the Microsoft x64 ABI
-- Build import tables and call external DLL functions through the IAT
-- Discover imports from installed Windows SDK/MSVC COFF import libraries
-- Preprocess local files and Windows/MSVC headers in memory
-- Handle structs, unions, typedefs, enums, arrays, pointers, globals, string literals, and common control flow
-- Compile and run the included `sysinfo.c` Windows diagnostic CLI
+## Why Atlas?
 
-The compiler no longer writes a debug `preprocessed.c` side file during normal builds.
+Most hobby compilers stop at either generating C or targeting a custom VM. Atlas goes further: it produces real native Windows PE32+ binaries that run without any runtime support, CRT startup, or external toolchain. A few things that set it apart:
+
+- **Genuinely zero dependencies.** The `[dependencies]` section in `Cargo.toml` is empty. No `inkwell`, no `object`, no `goblin`. Every data structure, every encoding, every binary layout is hand-written.
+- **Real preprocessor.** Full macro expansion, recursive `#include`, conditional compilation, `#pragma pack`, `__VA_ARGS__`, token pasting, and automatic discovery of Windows SDK and MSVC include paths — so `#include <stdio.h>` actually works.
+- **Multi-file compilation.** Atlas can compile multiple `.c` files separately with `-c`, producing custom `.obj` files, then link them together into a single executable — including dead code elimination across the merged object.
+- **No text assembly step.** The encoder writes x86-64 bytes directly from the machine IR. There is no intermediate `.asm` file and no call to NASM or MASM.
+- **Understands the Windows ABI.** Shadow space, argument registers (RCX/RDX/R8/R9), 16-byte stack alignment before every `call`, sized memory operations, RIP-relative imports via `FF 15` — all handled correctly.
+- **Import resolution from `.lib` files.** Atlas parses COFF import libraries from your installed Windows SDK and MSVC toolchain to map symbols to their DLLs automatically, instead of maintaining a hardcoded lookup table.
+
+---
+
+## Features
+
+- Full C preprocessor with MSVC compatibility macros
+- Hand-written recursive-descent parser covering most of C99
+- Semantic type checker with scope resolution and lvalue validation
+- Typed IR with explicit basic blocks and correct struct layout computation
+- Microsoft x64 calling convention with correct stack alignment
+- Sized memory operations: 8/16/32/64-bit load/store/extend
+- Peephole optimizer: redundant load elimination via stack value tracking
+- Direct x86-64 machine code emission — no text assembly stage
+- Custom binary object file format (`CCOBJ001`) for separate compilation
+- Multi-file linking with dead code elimination (reachability from `main`)
+- PE32+ binary writer: DOS header, COFF, optional header, section table, IAT
+- Automatic symbol-to-DLL resolution by scanning installed `.lib` archives
+- Precompiled header support (binary serialization of full AST + macro state)
+- Anonymous struct/union field flattening
+- Variadic function support (`__va_start` intrinsic)
+- `#pragma pack` push/pop stack
+- `sizeof` and `alignof` with correct struct alignment semantics
+- Function pointers and indirect calls
+
+---
 
 ## Quick Start
 
-```powershell
-cargo run -- sysinfo.c out.exe
-.\out.exe
+```bash
+# Build the compiler
+cargo build --release
+
+# Compile and link in one step
+./target/release/compiler sysinfo.c -o sysinfo.exe
+
+# Run it
+./sysinfo.exe
 ```
 
-Expected output includes host name, current user, RAM usage, CPU architecture/core count, page size, and C: drive capacity.
+**Separate compilation:**
+```bash
+# Compile each file to a .obj
+./target/release/compiler -c foo.c -o foo.obj
+./target/release/compiler -c bar.c -o bar.obj
 
-To compile another C file:
-
-```powershell
-cargo run -- input.c output.exe
+# Link them together
+./target/release/compiler foo.obj bar.obj -o app.exe
 ```
 
-For unusual imports that are not present in discovered SDK/MSVC import libraries:
+**Precompiled headers:**
+```bash
+# Build a PCH from a header-heavy file
+./target/release/compiler --make-pch stdafx.pch stdafx.c
 
-```powershell
-cargo run -- input.c output.exe --import MyDll.dll:MyFunction
+# Use it when compiling other files
+./target/release/compiler -c main.c --use-pch stdafx.pch -o main.obj
 ```
+
+**All options:**
+```
+compiler [-c] <file.c|file.obj>... [-o output]
+         [--import DLL:FUNC ...]
+         [--make-pch FILE] [--use-pch FILE]
+```
+
+---
 
 ## Example
 
+`sysinfo.c` — included in the repo. Calls real Win32 APIs with struct pointer arguments, uses `#include <stdio.h>` resolved against your actual SDK headers, and exercises printf with multiple format specifiers.
+
 ```c
-extern int MessageBoxA(void* hwnd, const char* text, const char* caption, int type);
+#include <stdio.h>
+#include <time.h>
+
+typedef unsigned int       DWORD;
+typedef unsigned long long DWORDLONG;
+
+struct MEMORYSTATUSEX {
+    DWORD     dwLength;
+    DWORD     dwMemoryLoad;
+    DWORDLONG ullTotalPhys;
+    DWORDLONG ullAvailPhys;
+    // ...
+};
+
+extern int  GlobalMemoryStatusEx(struct MEMORYSTATUSEX* lpBuffer);
+extern int  GetComputerNameA(char* lpBuffer, DWORD* nSize);
 
 int main() {
-    MessageBoxA(0, "Hello from my compiler!", "My Compiler", 0);
+    char computer[256];
+    DWORD sz = 256;
+    struct MEMORYSTATUSEX mem;
+    mem.dwLength = sizeof(struct MEMORYSTATUSEX);
+
+    time_t now = time(NULL);
+    struct tm* lt = localtime(&now);
+    printf("Date: %04d-%02d-%02d\n", lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
+
+    if (GetComputerNameA(&computer[0], &sz))
+        printf("Host: %s\n", &computer[0]);
+
+    if (GlobalMemoryStatusEx(&mem))
+        printf("RAM: %llu MiB total, %llu MiB free\n",
+               mem.ullTotalPhys / 1024 / 1024,
+               mem.ullAvailPhys / 1024 / 1024);
     return 0;
 }
 ```
 
-```powershell
-cargo run -- test_msgbox.c msgbox.exe
-.\msgbox.exe
 ```
+==================================================
+        System Information Diagnostic
+==================================================
+
+[*] Local System Time:
+    Date: 2026-06-10 (YYYY-MM-DD)
+    Time: 14:23:07
+
+[*] Host Identity:
+    Host Computer Name: DESKTOP-XYZ
+    Current User: ben
+
+[*] Physical Memory (RAM):
+    Total RAM: 32678 MiB
+    Active RAM: 14203 MiB
+    Avail RAM: 18475 MiB
+    Memory Load: 43%
+```
+
+---
 
 ## Architecture
 
-### Preprocessor
+### Preprocessor (`src/preprocessor/`)
 
-`src/preprocessor/` expands macros, resolves includes, predefines a small MSVC/Windows environment, and discovers installed SDK/MSVC include directories.
+The preprocessor runs before the lexer and produces a clean token stream with all directives resolved. It handles:
 
-### Lexer
+- **Macro expansion** — object-like and function-like macros with correct rescanning, argument substitution, and expansion guards to prevent infinite recursion
+- **Token pasting and stringification** — `##` and `#` operators inside macro bodies
+- **Variadic macros** — `__VA_ARGS__` with correct expansion and stringification
+- **`#include` resolution** — recursive with cycle detection; searches the source file's directory first, then system paths discovered at runtime
+- **Conditional compilation** — `#ifdef`, `#ifndef`, `#if`, `#elif`, `#else`, `#endif` backed by a full expression evaluator supporting `defined()`, arithmetic, bitwise, and logical operators
+- **`#pragma pack`** — push/pop stack; emits sentinel tokens (`__pragma_pack_push_N`, `__pragma_pack_pop`) consumed by the parser
+- **Predefined macros** — `_WIN32`, `_WIN64`, `_MSC_VER` (1930), `_M_AMD64`, `__STDC__`, `__cdecl`, `__declspec(x)`, `NULL`, and others that Windows SDK headers depend on
+- **SDK/MSVC discovery** — reads `%INCLUDE%`, walks `Program Files (x86)/Windows Kits/10/Include/<latest>/ucrt|shared|um|winrt` and Visual Studio MSVC include paths to find system headers automatically
+- **Line continuation** — backslash-newline splicing before tokenization
 
-`src/lexer/` tokenizes C source into keywords, identifiers, literals, operators, punctuation, and preprocessor-ready token streams.
+### Lexer (`src/lexer/`)
 
-### Parser
+Hand-written tokenizer with full line/column tracking for error messages. Handles all C tokens including hex literals (`0x...`), integer/float suffixes (`ULL`, `f`, `L`), all escape sequences, the full set of compound-assignment and bitwise operators, `->`, and `...` for variadic declarations.
 
-`src/parser/` is a hand-written recursive-descent parser. It builds the AST for declarations, functions, types, expressions, statements, structs/unions, enums, typedefs, and common MSVC syntax.
+### Parser (`src/parser/`)
 
-### IR
+Recursive-descent parser that builds a typed AST. Coverage includes:
 
-`src/ir/` lowers the AST into a simpler intermediate representation with explicit blocks, virtual registers, loads/stores, calls, branches, globals, and string literals.
+- All declaration forms: functions, local and global variables, structs, unions, enums, typedefs
+- All statement forms: `if/else`, `while`, `do-while`, `for`, `switch/case/default`, `break`, `continue`, `goto`, labeled statements, `return`
+- Expressions with correct precedence via precedence climbing: binary, unary, ternary, casts, `sizeof`, `alignof`, address-of, dereference, struct member access (`.` and `->`), array indexing, function calls
+- All assignment operators (`=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`)
+- MSVC extension keywords: `__declspec`, `__stdcall`, `__cdecl`, `__fastcall`, `__int8/16/32/64`, `__forceinline`, `__pragma`, `__unaligned`
+- Typedef-name tracking for correct type vs. identifier disambiguation during parsing
+- Enum constant evaluation with compile-time integer expression folding
+- **Precompiled header (PCH)** — binary serialization and deserialization of the full parsed AST, all active macro definitions, typedef names, and enum constants; enables fast re-compilation of large header-heavy translation units
 
-### Codegen
+### Semantic Analysis (`src/sema.rs`)
 
-`src/codegen/` lowers IR into x86-64 machine instructions using the Microsoft x64 calling convention:
+A dedicated semantic pass runs after parsing and before IR lowering. It:
 
-- First four integer/pointer args in `RCX`, `RDX`, `R8`, `R9`
-- Stack shadow space for calls
-- Return values in `RAX`
-- RIP-relative access for strings, globals, and imports
-- Support for MSVC `__va_start` used by CRT inline varargs wrappers
+- Collects all function signatures, struct field maps, typedefs, global declarations, and enum constants
+- Checks all function bodies with scoped variable tracking
+- Validates types on binary/unary expressions, assignments, and function calls
+- Verifies that lvalue-required contexts (assignment left-hand sides, address-of) receive actual lvalues
+- Reports errors with source location (line:col from the span attached to each AST node)
 
-### Linker / PE Writer
+### IR (`src/ir/`)
 
-`src/linker/` writes PE32+ binaries directly. It builds headers, sections, import descriptors, hint/name tables, and an entry trampoline that calls `main` and exits through `ExitProcess`.
+A typed, flat intermediate representation with explicit basic blocks.
 
-The import resolver scans installed Windows SDK/MSVC `.lib` files, reads COFF short import objects, and maps referenced symbols to their DLLs. This replaces the old hard-coded function-to-DLL table.
+**Types:** `void`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `ptr(T)`, `array(T, N)`
 
-## Current Limits
+**Instructions:** `alloca`, `load`, `store`, `binop`, `unaryop`, `call`, `gep` (pointer arithmetic), `cast`, `copy`
 
-Known gaps include:
+**Terminators:** `ret`, `br`, `condbr`, `unreachable`
 
-- Incomplete C standard coverage
-- Limited diagnostics and type checking
-- No object-file output or multi-file linker
-- No debug info
-- Limited floating-point support
-- Partial ABI support for complex aggregate passing/returning
-- Limited optimizer behavior
-- Partial MSVC/GNU extension coverage
+The lowering pass computes struct field offsets and sizes with correct natural alignment and `#pragma pack` overrides. Union fields all map to offset 0 with the struct size set to the largest field. Anonymous struct/union fields are flattened into the parent's field namespace. Typedef cycles are detected. String literals are pooled with automatic null termination. Global variables with constant initializers are emitted to the `.data` section.
 
-## Project Layout
+### Codegen (`src/codegen/`)
 
-- `src/main.rs`: CLI and pipeline driver
-- `src/preprocessor/`: macro expansion and include handling
-- `src/lexer/`: tokenization
-- `src/parser/`: AST parser and PCH serialization
-- `src/ir/`: IR definitions and lowering
-- `src/codegen/`: machine instruction selection and encoding
-- `src/linker/`: PE writer and SDK/MSVC import-library resolver
-- `sysinfo.c`: Windows system information CLI compiled by this compiler
+Translates IR into machine instructions following the Microsoft x64 ABI:
 
-## Verification
+- First four integer/pointer arguments in `RCX`, `RDX`, `R8`, `R9`; remaining arguments spilled to the stack
+- 32-byte shadow space allocated before every `call`
+- Return values in `RAX`; stack kept 16-byte aligned before every `call`
+- Every virtual register gets a fixed `[RBP - N]` slot — no register allocator, spill-everything layout
+- **Sized memory operations** — 8-bit (`Mov8`/`Movzx8`), 16-bit (`Mov16`/`Movzx16`), 32-bit (`Mov32`), 64-bit (`Mov`) — selected based on the IR type of the load/store
+- **Peephole optimizer** — tracks which stack slots hold known values and eliminates redundant load-after-store sequences; runs to a fixed point
+- RIP-relative addressing for string literals, global variables, and IAT import slots
+- `__va_start` intrinsic: spills the four argument registers into the shadow space area so `va_arg` can walk them sequentially
+- Division and modulo via `CQO` + `IDIV`; modulo copies `RDX` to `RAX`
+- Comparisons via `CMP` + `SETcc` + `MOVZX` producing a clean 0/1 integer result
+- Function pointers via `CALL RAX` (indirect register call)
+- External DLL calls via `FF 15 rel32` (RIP-relative indirect through the IAT slot)
+- Internal function calls via `E8 rel32` (direct relative call)
 
-Useful smoke test:
+### Machine Code Encoder (`src/codegen/encode.rs`)
 
-```powershell
-cargo check
-cargo run -- sysinfo.c out.exe
-.\out.exe
+Emits raw x86-64 bytes from the machine instruction list — no textual assembly intermediate:
+
+- **REX prefixes** — `REX.W` for 64-bit operands, `REX.R`/`REX.B` for registers R8–R15; 8-bit and 16-bit operations emit the correct REX or operand-size prefix
+- **ModR/M** — register-register (`mod=11`), register-memory with base register, RIP-relative (`mod=00 rm=101`)
+- **SIB** — emitted when the base register is `RSP`
+- **Displacement** — 8-bit when the value fits in a signed byte, 32-bit otherwise
+- **RIP-relative relocations** — `(offset, symbol)` pairs patched by the PE writer once section layout is finalized
+- **Label fixups** — intra-function branch targets resolved within the encoder after all instructions are emitted
+
+Instructions covered: `MOV`/`MOV8`/`MOV16`/`MOV32`, `LEA`, `ADD`, `SUB`, `IMUL`, `AND`, `OR`, `XOR`, `SHL`, `SAR`, `NEG`, `NOT`, `CQO`, `IDIV`, `CMP`, `SETcc`, `MOVZX8`/`MOVZX16`, `PUSH`, `POP`, `CALL`, `JMP`, `Jcc`, `RET`.
+
+### Object File Format (`src/linker/object.rs`)
+
+Atlas uses a custom binary object file format (magic `CCOBJ001`) rather than COFF. Each `.obj` stores:
+
+- Encoded function bytes and their names
+- Relocation records: `(function_name, [(offset, symbol)])` pairs
+- String literal table: `(name, bytes)`
+- Global variable table with type and optional initializer
+
+`write_object` / `read_object` serialize and deserialize this format. When multiple objects are merged, string literal names are scoped to avoid collisions, and duplicate symbol definitions are rejected with a diagnostic.
+
+### Linker (`src/linker/`)
+
+**Dead code elimination** — `retain_reachable_symbols` performs a reachability analysis from `main` over the merged relocation graph, then drops all unreachable functions, string literals, and globals before writing the PE. The number of pruned symbols is reported.
+
+**PE Writer (`pe.rs`)** constructs a valid PE32+ executable from scratch:
+
+- **DOS stub** — minimal header with correct `e_lfanew`
+- **COFF header** — machine type `0x8664` (AMD64), section count, characteristics
+- **Optional header (PE32+)** — `ImageBase` (`0x140000000`), `SectionAlignment` (0x1000), `FileAlignment` (0x200), subsystem (console), stack/heap sizes, data directory entries for the import table and IAT
+- **Sections** — `.text` (code), `.rdata` (string literals), `.data` (mutable globals), `.idata` (import structures)
+- **Import Directory Table** — one entry per DLL, null-terminated, with correct `OriginalFirstThunk`/`FirstThunk`/`Name` RVAs
+- **IAT** — hint/name entries for each imported symbol
+- **Entry trampoline:**
+  ```asm
+  and  rsp, -16        ; align (Windows entry RSP ≡ 8 mod 16)
+  call main
+  mov  rcx, rax        ; pass return value to ExitProcess
+  sub  rsp, 32         ; shadow space
+  call [rip+ExitProcess]
+  ```
+
+### Import Resolver (`src/linker/import_lib.rs`)
+
+Instead of a hardcoded function-to-DLL table, Atlas discovers the mapping dynamically by scanning the installed toolchain:
+
+- Searches `%INCLUDE%` / `%LIB%` environment variables, `Program Files (x86)/Windows Kits/10/lib`, and detected Visual Studio installation paths
+- Opens `.lib` files as COFF archives, reads the archive member headers
+- Parses **COFF Short Import Objects** (identified by `Sig1=0x0000, Sig2=0xFFFF`) to extract the symbol name and its source DLL
+- Handles the `__imp_` prefix convention automatically, registering both variants
+- Any unresolved extern symbol triggers a warning with a hint to use `--import DLL:FUNC`
+
+---
+
+## Supported C Subset
+
+| Feature | Status |
+|---|---|
+| `int`, `char`, `short`, `long`, `long long` | ✅ |
+| `unsigned` variants | ✅ |
+| `float`, `double` (parsing + IR) | ✅ |
+| Float/double arithmetic codegen | ❌ |
+| Pointers and pointer arithmetic | ✅ |
+| Arrays (fixed size) | ✅ |
+| `struct` and `union` | ✅ |
+| Anonymous struct/union fields | ✅ |
+| `enum` with constant expressions | ✅ |
+| `typedef` | ✅ |
+| `if / else` | ✅ |
+| `while`, `do-while`, `for` | ✅ |
+| `switch / case / default` | 🔧 Parsed, not yet lowered |
+| `break`, `continue` | ✅ |
+| `goto` | 🔧 Parsed, not yet lowered |
+| `return` | ✅ |
+| Function definitions and calls | ✅ |
+| Variadic functions (`...`, `va_list`) | ✅ |
+| Function pointers | ✅ |
+| `sizeof`, `alignof` | ✅ |
+| `#define` macros (object + function) | ✅ |
+| `#include` (local + system) | ✅ |
+| `#ifdef / #ifndef / #if / #elif` | ✅ |
+| `#pragma pack` | ✅ |
+| Variadic macros (`__VA_ARGS__`) | ✅ |
+| Token pasting (`##`) and stringification (`#`) | ✅ |
+| Precompiled headers (`.pch`) | ✅ |
+| MSVC extension keywords | ✅ |
+| Windows SDK headers (`<stdio.h>`, `<windows.h>`, etc.) | ✅ |
+| Multiple source files + separate compilation | ✅ |
+| Dead code elimination | ✅ |
+| Peephole optimization | ✅ |
+| Struct/array initializer lists | ❌ |
+| Float/double codegen (SSE2) | ❌ |
+| Bitfields | ❌ |
+| VLAs | ❌ |
+| Inline assembly | ❌ |
+| Register allocator | ❌ |
+
+---
+
+## Building
+
+**Requirements:**
+- Rust stable (edition 2024)
+- Windows 10/11 x64
+- Windows SDK and/or MSVC toolchain if you want `#include <windows.h>` to resolve
+
+```bash
+git clone https://github.com/fusexyz/atlas
+cd atlas
+cargo build --release
 ```
+
+The binary is at `target/release/compiler.exe`. No build scripts, no code generation, no external tools involved.
+
+---
+
+## Roadmap
+
+- [ ] `switch` statement lowering to conditional branches
+- [ ] `goto` and labeled `break`/`continue`
+- [ ] Struct and array initializer lists (`{1, 2, 3}`)
+- [ ] Floating-point codegen (SSE2)
+- [ ] Bitfield support
+- [ ] A proper register allocator (linear scan)
+- [ ] Stronger constant propagation and dead-store elimination
+- [ ] Debug info (CodeView / PDB)
+- [ ] Linux ELF target (System V AMD64 ABI)
+- [ ] A test suite with expected-output `.c` files
+
+---
+
+## License
+
+MIT. See [LICENSE](LICENSE).

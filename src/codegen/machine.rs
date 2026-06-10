@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum Reg {
     Rax,
@@ -156,7 +156,7 @@ impl Cond {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Operand {
     Reg(Reg),
     Imm(i64),
@@ -170,7 +170,7 @@ impl Operand {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inst {
     Label(String),
     Push(Reg),

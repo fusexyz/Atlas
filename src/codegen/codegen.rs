@@ -1,4 +1,5 @@
 use super::machine::*;
+use super::opt::optimize_insts;
 use crate::ir::ir::*;
 use std::collections::{HashMap, HashSet};
 
@@ -223,7 +224,7 @@ impl<'a> Gen<'a> {
             } else {
                 self.push(Inst::Mov(
                     Operand::Reg(RAX),
-                    Operand::mem(RBP, (16 + 8 * (i - 4)) as i32),
+                    Operand::mem(RBP, (48 + 8 * (i - 4)) as i32),
                 ));
                 self.push(Inst::Mov(Operand::mem(RBP, off), Operand::Reg(RAX)));
             }
@@ -461,6 +462,6 @@ fn compile_function(func: &Function, extern_funcs: &HashSet<String>) -> CR<Machi
     g.gen_function()?;
     Ok(MachineFunction {
         name: func.name.clone(),
-        insts: g.insts,
+        insts: optimize_insts(g.insts),
     })
 }

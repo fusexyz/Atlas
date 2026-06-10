@@ -66,6 +66,7 @@ pub struct FuncDecl {
     pub name: String,
     pub ret_ty: TypeSpec,
     pub params: Vec<Param>,
+    pub variadic: bool,
     pub storage: StorageClass,
     pub span: Span,
 }

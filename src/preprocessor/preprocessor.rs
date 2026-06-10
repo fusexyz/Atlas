@@ -35,10 +35,7 @@ pub fn preprocess(
     skip_headers: &HashSet<String>,
 ) -> Result<String, String> {
     if active_includes.contains(filepath) {
-        return Err(format!(
-            "infinite include recursion detected: {:?}",
-            filepath
-        ));
+        return Ok(String::new());
     }
     active_includes.insert(filepath.to_path_buf());
 
@@ -938,16 +935,50 @@ impl PpExprParser {
     }
 
     fn parse_logical_and(&mut self) -> Result<i64, String> {
-        let mut lhs = self.parse_equality()?;
+        let mut lhs = self.parse_bitwise_or()?;
         while let Some(PpToken::Punct('&')) = self.peek() {
             if self.tokens.get(self.pos + 1) == Some(&PpToken::Punct('&')) {
                 self.advance();
                 self.advance();
-                let rhs = self.parse_equality()?;
+                let rhs = self.parse_bitwise_or()?;
                 lhs = if lhs != 0 && rhs != 0 { 1 } else { 0 };
             } else {
                 break;
             }
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Result<i64, String> {
+        let mut lhs = self.parse_bitwise_xor()?;
+        while self.peek() == Some(&PpToken::Punct('|'))
+            && self.tokens.get(self.pos + 1) != Some(&PpToken::Punct('|'))
+        {
+            self.advance();
+            let rhs = self.parse_bitwise_xor()?;
+            lhs |= rhs;
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Result<i64, String> {
+        let mut lhs = self.parse_bitwise_and()?;
+        while self.peek() == Some(&PpToken::Punct('^')) {
+            self.advance();
+            let rhs = self.parse_bitwise_and()?;
+            lhs ^= rhs;
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Result<i64, String> {
+        let mut lhs = self.parse_equality()?;
+        while self.peek() == Some(&PpToken::Punct('&'))
+            && self.tokens.get(self.pos + 1) != Some(&PpToken::Punct('&'))
+        {
+            self.advance();
+            let rhs = self.parse_equality()?;
+            lhs &= rhs;
         }
         Ok(lhs)
     }

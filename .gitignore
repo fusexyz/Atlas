@@ -1,4 +1,5 @@
 /target
 *.exe
+*.obj
 *.i64
 *.idb

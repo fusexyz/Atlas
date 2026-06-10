@@ -9,6 +9,8 @@ pub struct Parser {
     pub pack_stack: Vec<u64>,
     pub current_pack: u64,
     pub enum_constants: std::collections::HashMap<String, i64>,
+    pending_items: Vec<TopLevel>,
+    last_type_had_inline: bool,
 }
 
 #[derive(Debug)]
@@ -48,6 +50,8 @@ impl Parser {
             pack_stack: Vec::new(),
             current_pack: 8,
             enum_constants: std::collections::HashMap::new(),
+            pending_items: Vec::new(),
+            last_type_had_inline: false,
         }
     }
 
@@ -274,10 +278,17 @@ impl Parser {
     pub fn parse(&mut self) -> PR<TranslationUnit> {
         let mut items = Vec::new();
         while !self.at_eof() {
+            if let Some(item) = self.pending_items.pop() {
+                items.push(item);
+                continue;
+            }
             if self.check_pragma_pack()? {
                 continue;
             }
             if self.check_pragma_inline()? {
+                continue;
+            }
+            if self.try_eat(&TokenKind::Semicolon) {
                 continue;
             }
             items.push(self.parse_top_level()?);
@@ -296,11 +307,17 @@ impl Parser {
 
         if self.check(&TokenKind::Typedef) {
             self.advance();
-            let ty = self.parse_type_spec()?;
+            let base_ty = self.parse_type_spec()?;
             self.skip_msvc_attributes()?;
-            let (name, _) = self.eat_ident()?;
-            self.eat(&TokenKind::Semicolon)?;
+            let (ty, name) = self.parse_typedef_declarator(base_ty.clone())?;
             self.typedef_names.insert(name.clone());
+            while self.try_eat(&TokenKind::Comma) {
+                let (extra_ty, extra_name) = self.parse_typedef_declarator(base_ty.clone())?;
+                self.typedef_names.insert(extra_name.clone());
+                self.pending_items
+                    .push(TopLevel::Typedef(extra_ty, extra_name, span.clone()));
+            }
+            self.eat(&TokenKind::Semicolon)?;
             return Ok(TopLevel::Typedef(ty, name, span));
         }
 
@@ -313,14 +330,56 @@ impl Parser {
             }
         }
 
-        let storage = self.parse_storage_class();
+        if (self.check(&TokenKind::Struct) || self.check(&TokenKind::Union))
+            && self.is_struct_forward_decl()
+        {
+            let is_union = self.check(&TokenKind::Union);
+            self.advance();
+            let (name, _) = self.eat_ident()?;
+            self.eat(&TokenKind::Semicolon)?;
+            return Ok(TopLevel::StructDef(StructDef {
+                name,
+                fields: Vec::new(),
+                is_union,
+                span,
+                pack: self.current_pack,
+            }));
+        }
+
+        if self.check(&TokenKind::Enum) && self.is_enum_def() {
+            let ty = self.parse_type_spec()?;
+            self.try_eat(&TokenKind::Semicolon);
+            return Ok(TopLevel::Typedef(
+                ty,
+                format!("__enum_decl_{}", self.enum_constants.len()),
+                span,
+            ));
+        }
+
+        let mut storage = self.parse_storage_class();
         let ty = self.parse_type_spec()?;
+        let is_inline = self.last_type_had_inline;
         self.skip_msvc_attributes()?;
+        let late_storage = self.parse_storage_class();
+        if late_storage != StorageClass::None {
+            storage = late_storage;
+        }
         let (name, name_span) = self.eat_ident()?;
 
         if self.check(&TokenKind::LParen) {
             let (params, variadic) = self.parse_param_list()?;
             if self.check(&TokenKind::LBrace) {
+                if storage == StorageClass::Static || is_inline {
+                    let _ = self.parse_block()?;
+                    return Ok(TopLevel::FuncDecl(FuncDecl {
+                        name,
+                        ret_ty: ty,
+                        params,
+                        variadic,
+                        storage,
+                        span: name_span,
+                    }));
+                }
                 let body = self.parse_block()?;
                 return Ok(TopLevel::Function(FuncDef {
                     ret_ty: ty,
@@ -337,6 +396,7 @@ impl Parser {
                 name,
                 ret_ty: ty,
                 params,
+                variadic,
                 storage,
                 span: name_span,
             }));
@@ -347,6 +407,9 @@ impl Parser {
         } else {
             None
         };
+        while self.try_eat(&TokenKind::Comma) {
+            self.skip_declarator_tail(ty.clone())?;
+        }
         self.eat(&TokenKind::Semicolon)?;
         Ok(TopLevel::Declaration(Decl {
             storage,
@@ -367,6 +430,94 @@ impl Parser {
             }
         }
         false
+    }
+
+    fn is_struct_forward_decl(&self) -> bool {
+        matches!(
+            (
+                &self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                &self.tokens.get(self.pos + 2).map(|t| &t.kind)
+            ),
+            (Some(TokenKind::Identifier(_)), Some(TokenKind::Semicolon))
+        )
+    }
+
+    fn is_enum_def(&self) -> bool {
+        let mut i = self.pos + 1;
+        while i < self.tokens.len() {
+            match &self.tokens[i].kind {
+                TokenKind::LBrace => return true,
+                TokenKind::Semicolon | TokenKind::Eof => return false,
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    fn parse_typedef_declarator(&mut self, base_ty: TypeSpec) -> PR<(TypeSpec, String)> {
+        let ty = self.parse_pointer_suffix(base_ty)?;
+        self.skip_msvc_attributes()?;
+        let name = if self.try_eat(&TokenKind::LParen) {
+            self.skip_msvc_attributes()?;
+            let ty = self.parse_pointer_suffix(ty)?;
+            self.skip_msvc_attributes()?;
+            let (name, _) = self.eat_ident()?;
+            self.eat(&TokenKind::RParen)?;
+            if self.check(&TokenKind::LParen) {
+                self.skip_balanced_suffix()?;
+            }
+            return Ok((ty, name));
+        } else {
+            let (name, _) = self.eat_ident()?;
+            name
+        };
+        let ty = if self.check(&TokenKind::LBracket) {
+            self.parse_array_suffix(ty)?
+        } else if self.check(&TokenKind::LParen) {
+            self.skip_balanced_suffix()?;
+            ty
+        } else {
+            ty
+        };
+        Ok((ty, name))
+    }
+
+    fn skip_balanced_suffix(&mut self) -> PR<()> {
+        self.eat(&TokenKind::LParen)?;
+        let mut depth = 1;
+        while depth > 0 && !self.at_eof() {
+            if self.check(&TokenKind::LParen) {
+                depth += 1;
+            } else if self.check(&TokenKind::RParen) {
+                depth -= 1;
+            }
+            self.advance();
+        }
+        Ok(())
+    }
+
+    fn skip_declarator_tail(&mut self, base_ty: TypeSpec) -> PR<()> {
+        let ty = self.parse_pointer_suffix(base_ty)?;
+        self.skip_msvc_attributes()?;
+        if self.try_eat(&TokenKind::LParen) {
+            self.skip_msvc_attributes()?;
+            let _ = self.parse_pointer_suffix(ty)?;
+            self.skip_msvc_attributes()?;
+            if matches!(self.peek().kind, TokenKind::Identifier(_)) {
+                self.advance();
+            }
+            self.eat(&TokenKind::RParen)?;
+            if self.check(&TokenKind::LParen) {
+                self.skip_balanced_suffix()?;
+            }
+        } else {
+            let _ = self.eat_ident()?;
+            let _ = self.parse_array_suffix(ty)?;
+        }
+        if self.try_eat(&TokenKind::Eq) {
+            let _ = self.parse_assign_expr()?;
+        }
+        Ok(())
     }
 }
 
@@ -394,6 +545,7 @@ impl Parser {
     }
 
     fn parse_type_spec(&mut self) -> PR<TypeSpec> {
+        self.last_type_had_inline = false;
         let mut unsigned = false;
         let mut signed = false;
         let mut long_count = 0usize;
@@ -401,11 +553,12 @@ impl Parser {
         loop {
             self.skip_msvc_attributes()?;
             match &self.peek().kind {
-                TokenKind::Const
-                | TokenKind::Volatile
-                | TokenKind::Restrict
-                | TokenKind::Inline => {
+                TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict => {
                     self.advance();
+                }
+                TokenKind::Inline => {
+                    self.advance();
+                    self.last_type_had_inline = true;
                 }
                 TokenKind::Unsigned => {
                     self.advance();
@@ -485,23 +638,37 @@ impl Parser {
                                 name: format!("__anon_field_{}", fields.len()),
                                 span: fspan,
                             });
+                        } else if self.check(&TokenKind::Colon) {
+                            self.advance();
+                            let _ = self.parse_assign_expr()?;
+                            self.eat(&TokenKind::Semicolon)?;
+                            fields.push(FieldDecl {
+                                ty: base_ty,
+                                name: format!("__anon_bitfield_{}", fields.len()),
+                                span: fspan,
+                            });
                         } else {
                             loop {
                                 let ty = self.parse_pointer_suffix(base_ty.clone())?;
                                 self.skip_msvc_attributes()?;
-                                let (fname, name_span) = self.eat_ident()?;
-                                let ty = if self.check(&TokenKind::LBracket) {
-                                    self.advance();
-                                    let size = if !self.check(&TokenKind::RBracket) {
-                                        Some(Box::new(self.parse_assign_expr()?))
-                                    } else {
-                                        None
-                                    };
-                                    self.eat(&TokenKind::RBracket)?;
-                                    TypeSpec::Array(Box::new(ty), size)
+                                let (ty, fname, name_span) = if self.try_eat(&TokenKind::LParen) {
+                                    self.skip_msvc_attributes()?;
+                                    let ty = self.parse_pointer_suffix(ty)?;
+                                    self.skip_msvc_attributes()?;
+                                    let (fname, name_span) = self.eat_ident()?;
+                                    self.eat(&TokenKind::RParen)?;
+                                    if self.check(&TokenKind::LParen) {
+                                        self.skip_balanced_suffix()?;
+                                    }
+                                    (ty, fname, name_span)
                                 } else {
-                                    ty
+                                    let (fname, name_span) = self.eat_ident()?;
+                                    let ty = self.parse_array_suffix(ty)?;
+                                    (ty, fname, name_span)
                                 };
+                                if self.try_eat(&TokenKind::Colon) {
+                                    let _ = self.parse_assign_expr()?;
+                                }
                                 fields.push(FieldDecl {
                                     ty,
                                     name: fname,
@@ -645,6 +812,20 @@ impl Parser {
         }
         Ok(ty)
     }
+
+    fn parse_array_suffix(&mut self, mut ty: TypeSpec) -> PR<TypeSpec> {
+        while self.check(&TokenKind::LBracket) {
+            self.advance();
+            let size = if !self.check(&TokenKind::RBracket) {
+                Some(Box::new(self.parse_assign_expr()?))
+            } else {
+                None
+            };
+            self.eat(&TokenKind::RBracket)?;
+            ty = TypeSpec::Array(Box::new(ty), size);
+        }
+        Ok(ty)
+    }
 }
 
 impl Parser {
@@ -678,6 +859,23 @@ impl Parser {
         let span = self.span();
         let ty = self.parse_type_spec()?;
         self.skip_msvc_attributes()?;
+        if self.try_eat(&TokenKind::LParen) {
+            self.skip_msvc_attributes()?;
+            let ty = self.parse_pointer_suffix(ty)?;
+            self.skip_msvc_attributes()?;
+            let name = if let TokenKind::Identifier(n) = &self.peek().kind {
+                let n = n.clone();
+                self.advance();
+                Some(n)
+            } else {
+                None
+            };
+            self.eat(&TokenKind::RParen)?;
+            if self.check(&TokenKind::LParen) {
+                self.skip_balanced_suffix()?;
+            }
+            return Ok(Param { ty, name, span });
+        }
         let name = if let TokenKind::Identifier(n) = &self.peek().kind {
             let n = n.clone();
             self.advance();
@@ -685,6 +883,7 @@ impl Parser {
         } else {
             None
         };
+        let ty = self.parse_array_suffix(ty)?;
         Ok(Param { ty, name, span })
     }
 }
@@ -718,6 +917,10 @@ impl Parser {
                 StmtKind::Block(vec![])
             }
             TokenKind::LBrace => StmtKind::Block(self.parse_block()?),
+            TokenKind::Semicolon => {
+                self.advance();
+                StmtKind::Block(vec![])
+            }
             TokenKind::Return => self.parse_return()?,
             TokenKind::If => self.parse_if()?,
             TokenKind::While => self.parse_while()?,
@@ -800,6 +1003,10 @@ impl Parser {
                     || name == "__thiscall"
                     || name == "__vectorcall"
                     || self.typedef_names.contains(name)
+                    || matches!(
+                        &self.peek2().kind,
+                        TokenKind::Identifier(_) | TokenKind::Star
+                    )
             }
             _ => false,
         }
@@ -817,18 +1024,7 @@ impl Parser {
         self.skip_msvc_attributes()?;
         let (name, _) = self.eat_ident()?;
 
-        let ty = if self.check(&TokenKind::LBracket) {
-            self.advance();
-            let size = if !self.check(&TokenKind::RBracket) {
-                Some(Box::new(self.parse_assign_expr()?))
-            } else {
-                None
-            };
-            self.eat(&TokenKind::RBracket)?;
-            TypeSpec::Array(Box::new(ty), size)
-        } else {
-            ty
-        };
+        let ty = self.parse_array_suffix(ty)?;
         let init = if self.try_eat(&TokenKind::Eq) {
             Some(self.parse_assign_expr()?)
         } else {
@@ -1077,7 +1273,7 @@ impl Parser {
             }
             TokenKind::Sizeof => {
                 self.advance();
-                if self.check(&TokenKind::LParen) && self.is_type_ahead() {
+                if self.check(&TokenKind::LParen) && self.is_sizeof_type_ahead() {
                     self.advance();
                     let ty = self.parse_type_spec()?;
                     self.eat(&TokenKind::RParen)?;
@@ -1119,7 +1315,10 @@ impl Parser {
             | TokenKind::Signed
             | TokenKind::Struct
             | TokenKind::Union
-            | TokenKind::Enum => true,
+            | TokenKind::Enum
+            | TokenKind::Const
+            | TokenKind::Volatile
+            | TokenKind::Restrict => true,
             TokenKind::Identifier(name) => {
                 name == "__int8"
                     || name == "__int16"
@@ -1133,6 +1332,22 @@ impl Parser {
 
     fn is_cast_ahead(&self) -> bool {
         self.is_type_ahead()
+    }
+
+    fn is_sizeof_type_ahead(&self) -> bool {
+        if self.is_type_ahead() {
+            return true;
+        }
+        matches!(
+            (
+                &self.peek2().kind,
+                self.tokens.get(self.pos + 2).map(|t| &t.kind)
+            ),
+            (
+                TokenKind::Identifier(_),
+                Some(TokenKind::RParen | TokenKind::Star | TokenKind::Identifier(_))
+            )
+        )
     }
 
     fn parse_postfix(&mut self) -> PR<Expr> {

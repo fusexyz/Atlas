@@ -974,6 +974,7 @@ fn write_func_decl<W: Write>(w: &mut W, fd: &FuncDecl) -> std::io::Result<()> {
     for p in &fd.params {
         write_param(w, p)?;
     }
+    write_u8(w, if fd.variadic { 1 } else { 0 })?;
     write_storage_class(w, &fd.storage)?;
     write_span(w, &fd.span)
 }
@@ -985,12 +986,14 @@ fn read_func_decl<R: Read>(r: &mut R) -> std::io::Result<FuncDecl> {
     for _ in 0..len {
         params.push(read_param(r)?);
     }
+    let variadic = read_u8(r)? != 0;
     let storage = read_storage_class(r)?;
     let span = read_span(r)?;
     Ok(FuncDecl {
         name,
         ret_ty,
         params,
+        variadic,
         storage,
         span,
     })

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "compiler"
+name = "atlas"
 version = "0.1.0"

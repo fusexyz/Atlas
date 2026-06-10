@@ -12,6 +12,7 @@ impl ImportResolver {
         for dir in discover_import_lib_dirs() {
             resolver.load_dir(&dir);
         }
+        resolver.load_system_dll_exports();
         resolver
     }
 
@@ -57,6 +58,21 @@ impl ImportResolver {
                 .or_insert_with(|| dll.clone());
         } else {
             self.symbols.entry(format!("__imp_{symbol}")).or_insert(dll);
+        }
+    }
+
+    fn load_system_dll_exports(&mut self) {
+        let Some(system_root) = std::env::var_os("SystemRoot") else {
+            return;
+        };
+        let system32 = PathBuf::from(system_root).join("System32");
+        for dll in ["msvcrt.dll", "ucrtbase.dll"] {
+            let path = system32.join(dll);
+            if let Ok(bytes) = std::fs::read(&path) {
+                for symbol in parse_pe_exports(&bytes) {
+                    self.add_symbol(&symbol, dll);
+                }
+            }
         }
     }
 }
@@ -192,4 +208,104 @@ fn normalize_dll_name(dll: &str) -> String {
     } else {
         format!("{dll}.dll")
     }
+}
+
+fn parse_pe_exports(bytes: &[u8]) -> Vec<String> {
+    let Some(pe_off) = read_u32(bytes, 0x3c).map(|v| v as usize) else {
+        return Vec::new();
+    };
+    if bytes.get(0..2) != Some(b"MZ") || bytes.get(pe_off..pe_off + 4) != Some(b"PE\0\0") {
+        return Vec::new();
+    }
+    let Some(section_count) = read_u16(bytes, pe_off + 6).map(|v| v as usize) else {
+        return Vec::new();
+    };
+    let Some(opt_size) = read_u16(bytes, pe_off + 20).map(|v| v as usize) else {
+        return Vec::new();
+    };
+    let opt_off = pe_off + 24;
+    let Some(magic) = read_u16(bytes, opt_off) else {
+        return Vec::new();
+    };
+    let data_dir_off = match magic {
+        0x10b => opt_off + 96,
+        0x20b => opt_off + 112,
+        _ => return Vec::new(),
+    };
+    let Some(export_rva) = read_u32(bytes, data_dir_off) else {
+        return Vec::new();
+    };
+    if export_rva == 0 {
+        return Vec::new();
+    }
+    let section_off = opt_off + opt_size;
+    let mut sections = Vec::new();
+    for i in 0..section_count {
+        let off = section_off + i * 40;
+        let Some(vsize) = read_u32(bytes, off + 8) else {
+            return Vec::new();
+        };
+        let Some(va) = read_u32(bytes, off + 12) else {
+            return Vec::new();
+        };
+        let Some(raw_size) = read_u32(bytes, off + 16) else {
+            return Vec::new();
+        };
+        let Some(raw_ptr) = read_u32(bytes, off + 20) else {
+            return Vec::new();
+        };
+        sections.push((va, vsize.max(raw_size), raw_ptr));
+    }
+    let Some(export_off) = rva_to_off(export_rva, &sections) else {
+        return Vec::new();
+    };
+    let Some(name_count) = read_u32(bytes, export_off + 24) else {
+        return Vec::new();
+    };
+    let Some(names_rva) = read_u32(bytes, export_off + 32) else {
+        return Vec::new();
+    };
+    let Some(names_off) = rva_to_off(names_rva, &sections) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 0..name_count as usize {
+        let Some(name_rva) = read_u32(bytes, names_off + i * 4) else {
+            break;
+        };
+        let Some(name_off) = rva_to_off(name_rva, &sections) else {
+            continue;
+        };
+        if let Some(name) = read_cstr(bytes, name_off as usize) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn rva_to_off(rva: u32, sections: &[(u32, u32, u32)]) -> Option<usize> {
+    sections.iter().find_map(|(va, size, raw)| {
+        if *va <= rva && rva < va.saturating_add(*size) {
+            Some((raw + (rva - va)) as usize)
+        } else {
+            None
+        }
+    })
+}
+
+fn read_cstr(bytes: &[u8], off: usize) -> Option<String> {
+    let end = bytes.get(off..)?.iter().position(|b| *b == 0)? + off;
+    std::str::from_utf8(bytes.get(off..end)?)
+        .ok()
+        .map(str::to_string)
+}
+
+fn read_u16(bytes: &[u8], off: usize) -> Option<u16> {
+    let b = bytes.get(off..off + 2)?;
+    Some(u16::from_le_bytes([b[0], b[1]]))
+}
+
+fn read_u32(bytes: &[u8], off: usize) -> Option<u32> {
+    let b = bytes.get(off..off + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }

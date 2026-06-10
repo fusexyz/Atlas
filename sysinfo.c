@@ -1,80 +1,24 @@
 #include <stdio.h>
 #include <time.h>
-
-typedef int BOOL;
-typedef unsigned short WORD;
-typedef unsigned int DWORD;
-typedef unsigned long long DWORDLONG;
-typedef unsigned long long DWORD_PTR;
-
-struct MEMORYSTATUSEX {
-    DWORD dwLength;
-    DWORD dwMemoryLoad;
-    DWORDLONG ullTotalPhys;
-    DWORDLONG ullAvailPhys;
-    DWORDLONG ullTotalPageFile;
-    DWORDLONG ullAvailPageFile;
-    DWORDLONG ullTotalVirtual;
-    DWORDLONG ullAvailVirtual;
-    DWORDLONG ullAvailExtendedVirtual;
-};
-
-struct SYSTEM_INFO {
-    WORD wProcessorArchitecture;
-    WORD wReserved;
-    DWORD dwPageSize;
-    void* lpMinimumApplicationAddress;
-    void* lpMaximumApplicationAddress;
-    DWORD_PTR dwActiveProcessorMask;
-    DWORD dwNumberOfProcessors;
-    DWORD dwProcessorType;
-    DWORD dwAllocationGranularity;
-    WORD wProcessorLevel;
-    WORD wProcessorRevision;
-};
-
-extern BOOL GetComputerNameA(char* lpBuffer, DWORD* nSize);
-extern BOOL GetUserNameA(char* lpBuffer, DWORD* pcbBuffer);
-extern void GetSystemInfo(struct SYSTEM_INFO* lpSystemInfo);
-extern BOOL GlobalMemoryStatusEx(struct MEMORYSTATUSEX* lpBuffer);
-extern BOOL GetDiskFreeSpaceExA(
-    const char* lpDirectoryName,
-    unsigned long long* lpFreeBytesAvailableToCaller,
-    unsigned long long* lpTotalNumberOfBytes,
-    unsigned long long* lpTotalNumberOfFreeBytes
-);
-
-unsigned long long to_mib(unsigned long long bytes) {
-    return bytes / 1024 / 1024;
-}
-
-void print_architecture(WORD arch) {
-    if (arch == 9) {
-        printf("    Architecture: x64 (AMD64)\n");
-    } else if (arch == 5) {
-        printf("    Architecture: ARM\n");
-    } else if (arch == 12) {
-        printf("    Architecture: ARM64\n");
-    } else if (arch == 0) {
-        printf("    Architecture: x86\n");
-    } else {
-        printf("    Architecture: Unknown (%d)\n", arch);
-    }
-}
+#include <windows.h>
+#include "sysinfo.h"
 
 int main() {
     char computer[256];
     char user[256];
     DWORD computer_size = 256;
     DWORD user_size = 256;
-    struct MEMORYSTATUSEX mem;
-    struct SYSTEM_INFO sys;
+    MEMORYSTATUSEX mem;
+    SYSTEM_INFO sys;
     unsigned long long free_to_user = 0;
     unsigned long long disk_total = 0;
     unsigned long long disk_free = 0;
 
+    printf("==================================================\n");
+    printf("        System Information Diagnostic              \n");
+    printf("==================================================\n\n");
 
-    time_t now = time(NULL);
+    time_t now = time(0);
     struct tm* lt = localtime(&now);
     printf("[*] Local System Time:\n");
     printf("    Date: %04d-%02d-%02d (YYYY-MM-DD)\n", lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
@@ -93,7 +37,7 @@ int main() {
         printf("    Current User: unavailable\n\n");
     }
 
-    mem.dwLength = sizeof(struct MEMORYSTATUSEX);
+    mem.dwLength = sizeof(MEMORYSTATUSEX);
     printf("[*] Physical Memory (RAM):\n");
     if (GlobalMemoryStatusEx(&mem)) {
         printf("    Total RAM: %llu MiB\n", to_mib(mem.ullTotalPhys));
@@ -106,7 +50,7 @@ int main() {
 
     GetSystemInfo(&sys);
     printf("[*] CPU and Architecture:\n");
-    print_architecture(sys.wProcessorArchitecture);
+    print_architecture(sys.u.s.wProcessorArchitecture);
     printf("    Processor Cores: %lu\n", sys.dwNumberOfProcessors);
     printf("    System Page Size: %lu bytes\n\n", sys.dwPageSize);
 
@@ -119,6 +63,9 @@ int main() {
         printf("    Disk status unavailable\n\n");
     }
 
+    printf("==================================================\n");
+    printf(" Diagnostics Completed.\n");
+    printf("==================================================\n");
 
     return 0;
 }

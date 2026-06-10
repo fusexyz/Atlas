@@ -33,10 +33,38 @@ pub fn lower_module(tu: &TranslationUnit) -> LR<Module> {
             ctx.typedefs.insert(name.clone(), ty.clone());
         }
     }
-    for item in &tu.items {
-        if let TopLevel::StructDef(s) = item {
-            ctx.lower_struct_def(s)?;
+    let mut pending_structs: Vec<&StructDef> = tu
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let TopLevel::StructDef(s) = item {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .collect();
+    while !pending_structs.is_empty() {
+        let before = pending_structs.len();
+        let mut retry = Vec::new();
+        for s in pending_structs {
+            match ctx.lower_struct_def(s) {
+                Ok(()) => {}
+                Err(e)
+                    if e.0.starts_with("undefined struct '")
+                        || e.0.starts_with("undefined union '") =>
+                {
+                    retry.push(s);
+                }
+                Err(e) => return Err(e),
+            }
         }
+        if retry.len() == before {
+            if let Err(e) = ctx.lower_struct_def(retry[0]) {
+                return Err(e);
+            }
+        }
+        pending_structs = retry;
     }
     for item in &tu.items {
         match item {
@@ -74,7 +102,9 @@ impl ModuleCtx {
 
     fn lower_top_level(&mut self, item: &TopLevel) -> LR<()> {
         match item {
-            TopLevel::Function(f) => self.lower_function(f),
+            TopLevel::Function(f) => self
+                .lower_function(f)
+                .map_err(|e| LowerError(format!("in function '{}': {}", f.name, e.0))),
             TopLevel::FuncDecl(d) => self.lower_func_decl(d),
             TopLevel::Declaration(d) => self.lower_global_decl(d),
             TopLevel::StructDef(s) => self.lower_struct_def(s),
@@ -200,7 +230,7 @@ impl ModuleCtx {
             ret_ty,
             blocks: Vec::new(),
             is_extern: true,
-            variadic: false,
+            variadic: decl.variadic,
         });
         Ok(())
     }
@@ -1047,8 +1077,8 @@ impl<'a> FuncBuilder<'a> {
                 )?;
                 let resolved = resolve_typedefs(&base_ty, self.typedefs)?;
                 let struct_name = match resolved {
-                    TypeSpec::Struct(name) => name,
-                    _ => return err!("member access on non-struct type"),
+                    TypeSpec::Struct(name) | TypeSpec::Union(name) => name,
+                    _ => return err!("member access on non-struct-or-union type"),
                 };
                 let layout = self
                     .struct_layouts
@@ -1086,8 +1116,8 @@ impl<'a> FuncBuilder<'a> {
                 };
                 let resolved_inner = resolve_typedefs(&inner_ty, self.typedefs)?;
                 let struct_name = match resolved_inner {
-                    TypeSpec::Struct(name) => name,
-                    _ => return err!("arrow access on pointer to non-struct type"),
+                    TypeSpec::Struct(name) | TypeSpec::Union(name) => name,
+                    _ => return err!("arrow access on pointer to non-struct-or-union type"),
                 };
                 let layout = self
                     .struct_layouts
@@ -1200,17 +1230,17 @@ pub fn lower_type(
         TypeSpec::Char => Ok(IrType::I8),
         TypeSpec::Short => Ok(IrType::I16),
         TypeSpec::Int => Ok(IrType::I32),
-        TypeSpec::Long | TypeSpec::LongLong => Ok(IrType::I64),
+        TypeSpec::Long => Ok(IrType::I32),
+        TypeSpec::LongLong => Ok(IrType::I64),
         TypeSpec::Float => Ok(IrType::F32),
         TypeSpec::Double => Ok(IrType::F64),
         TypeSpec::Unsigned(inner) => lower_type(inner, typedefs, struct_layouts, enum_constants),
         TypeSpec::Signed(inner) => lower_type(inner, typedefs, struct_layouts, enum_constants),
-        TypeSpec::Pointer(inner) => Ok(IrType::Ptr(Box::new(lower_type(
-            inner,
-            typedefs,
-            struct_layouts,
-            enum_constants,
-        )?))),
+        TypeSpec::Pointer(inner) => {
+            let pointee =
+                lower_type(inner, typedefs, struct_layouts, enum_constants).unwrap_or(IrType::I8);
+            Ok(IrType::Ptr(Box::new(pointee)))
+        }
         TypeSpec::Array(elem, Some(size_expr)) => {
             let elem_ty = lower_type(elem, typedefs, struct_layouts, enum_constants)?;
             let n = eval_const_expr_lower(size_expr, typedefs, struct_layouts, enum_constants)
@@ -1301,7 +1331,8 @@ fn get_type_size_and_align(
         TypeSpec::Char => Ok((1, 1)),
         TypeSpec::Short => Ok((2, 2)),
         TypeSpec::Int => Ok((4, 4)),
-        TypeSpec::Long | TypeSpec::LongLong => Ok((8, 8)),
+        TypeSpec::Long => Ok((4, 4)),
+        TypeSpec::LongLong => Ok((8, 8)),
         TypeSpec::Float => Ok((4, 4)),
         TypeSpec::Double => Ok((8, 8)),
         TypeSpec::Unsigned(inner) | TypeSpec::Signed(inner) => {
@@ -1384,8 +1415,8 @@ fn expr_type(
             let base_ty = expr_type(base, locals, typedefs, struct_layouts, globals)?;
             let resolved = resolve_typedefs(&base_ty, typedefs)?;
             let struct_name = match resolved {
-                TypeSpec::Struct(name) => name,
-                _ => return err!("member access on non-struct type"),
+                TypeSpec::Struct(name) | TypeSpec::Union(name) => name,
+                _ => return err!("member access on non-struct-or-union type"),
             };
             let layout = struct_layouts
                 .get(&struct_name)
@@ -1404,8 +1435,8 @@ fn expr_type(
             };
             let resolved_inner = resolve_typedefs(&inner_ty, typedefs)?;
             let struct_name = match resolved_inner {
-                TypeSpec::Struct(name) => name,
-                _ => return err!("arrow access on pointer to non-struct type"),
+                TypeSpec::Struct(name) | TypeSpec::Union(name) => name,
+                _ => return err!("arrow access on pointer to non-struct-or-union type"),
             };
             let layout = struct_layouts
                 .get(&struct_name)
