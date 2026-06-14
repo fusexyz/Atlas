@@ -465,6 +465,10 @@ Demo examples are in `examples/` — `sysinfo.c` and `sysinfo_format.c` demonstr
 
 ---
 
+## Credits
+Claude Opus 4.8 for the Lexer, Readme and the test files
+
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
